@@ -2,33 +2,188 @@
 
 .modificacion {
   overflow: hidden;
-  padding: 1em;
+  padding: 24px;
   color: "[theme:bodyText, default: #323130]";
   color: var(--bodyText);
+  background:
+    radial-gradient(circle at top right, rgba(2, 120, 87, 0.16), transparent 28%),
+    linear-gradient(180deg, #f6fbf8 0%, #eef6f1 100%);
+
   &.teams {
     font-family: $ms-font-family-fallbacks;
   }
+
+  &.dark {
+    background:
+      radial-gradient(circle at top right, rgba(82, 196, 151, 0.18), transparent 24%),
+      linear-gradient(180deg, #0f1916 0%, #15221e 100%);
+  }
 }
 
-.welcome {
-  text-align: center;
+.hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 28px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, #0b5c4b 0%, #17795d 100%);
+  color: #ffffff;
 }
 
-.welcomeImage {
-  width: 100%;
-  max-width: 420px;
+.title {
+  display: block;
+  font-weight: 700;
+  margin-bottom: 8px;
 }
 
-.links {
-  a {
-    text-decoration: none;
-    color: "[theme:link, default:#03787c]";
-    color: var(--link); // note: CSS Custom Properties support is limited to modern browsers only
+.subtitle {
+  display: block;
+  max-width: 780px;
+  color: rgba(255, 255, 255, 0.92);
+  line-height: 1.5;
+}
 
-    &:hover {
-      text-decoration: underline;
-      color: "[theme:linkHovered, default: #014446]";
-      color: var(--linkHovered); // note: CSS Custom Properties support is limited to modern browsers only
-    }
+.heroBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  white-space: nowrap;
+}
+
+.heroBadgeIcon {
+  font-size: 18px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  gap: 20px;
+}
+
+.mainCard,
+.sideCard,
+.logCard {
+  border-radius: 20px;
+  border: 1px solid rgba(16, 86, 67, 0.12);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 14px 34px rgba(15, 58, 47, 0.08);
+}
+
+.mainCard,
+.sideCard,
+.logCard {
+  padding: 24px;
+}
+
+.sectionTitle,
+.sideTitle,
+.logTitle,
+.statusTitle {
+  display: block;
+  font-weight: 700;
+}
+
+.sectionDescription,
+.sideDescription,
+.logDescription,
+.statusValue,
+.uploadHint {
+  display: block;
+  line-height: 1.5;
+  color: #4f6b63;
+}
+
+.uploadPanel {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  padding: 22px;
+  border: 1px dashed #87b6a4;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(229, 243, 236, 0.9) 0%, rgba(245, 251, 248, 0.95) 100%);
+}
+
+.uploadIconWrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  width: 72px;
+  height: 72px;
+  border-radius: 18px;
+  background: #d7efe4;
+}
+
+.uploadIcon {
+  font-size: 34px;
+  color: #0b6a53;
+}
+
+.uploadContent {
+  flex: 1;
+}
+
+.uploadTitle {
+  display: block;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.hiddenInput {
+  display: none;
+}
+
+.statusCard {
+  padding: 18px;
+  border-radius: 16px;
+  background: #f3f8f5;
+  border: 1px solid #d8e8df;
+}
+
+.infoPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: #e0f1e8;
+  color: #0b5c4b;
+  font-weight: 600;
+}
+
+.logHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.logField {
+  :global(.ms-TextField-fieldGroup) {
+    border-radius: 14px;
+    border: 1px solid #d1e1d8;
+    background: #f8fbf9;
+  }
+}
+
+@media (max-width: 900px) {
+  .modificacion {
+    padding: 16px;
+  }
+
+  .hero,
+  .uploadPanel,
+  .logHeader {
+    flex-direction: column;
+  }
+
+  .layout {
+    grid-template-columns: 1fr;
   }
 }

@@ -25,6 +25,7 @@ export default class ModificacionWebPart extends BaseClientSideWebPart<IModifica
     const element: React.ReactElement<IModificacionProps> = React.createElement(
       Modificacion,
       {
+        context: this.context,
         description: this.properties.description,
         isDarkTheme: this._isDarkTheme,
         environmentMessage: this._environmentMessage,
