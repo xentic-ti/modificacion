@@ -137,6 +137,20 @@ async function buildLookupMapByField(
   return map;
 }
 
+async function getAllowMultipleValues(
+  context: WebPartContext,
+  webUrl: string,
+  listTitle: string,
+  fieldInternalName: string
+): Promise<boolean> {
+  const field = await spGetJson<any>(
+    context,
+    `${webUrl}/_api/web/lists/getbytitle('${listTitle}')/fields/getbyinternalnameortitle('${fieldInternalName}')?$select=AllowMultipleValues`
+  );
+
+  return !!field.AllowMultipleValues;
+}
+
 async function buildProcesoCorporativoMap(
   context: WebPartContext,
   webUrl: string
@@ -215,7 +229,7 @@ async function getSolicitudById(context: WebPartContext, webUrl: string, solicit
     `FechaDeAprobacionSolicitud,FechadeVigencia,VersionDocumento,TipoDocumentoId,TipoDocumento/Title,` +
     `ProcesoDeNegocioId,ProcesoDeNegocio/Title,ProcesoDeNegocio/field_1,ProcesoDeNegocio/field_2,ProcesoDeNegocio/field_3,` +
     `AreaDuenaId,AreaDuena/Title,EstadoId,InstanciasdeaprobacionId,Instanciasdeaprobacion/Title,` +
-    `AreasImpactadas/Id,AreasImpactadas/Title,Accion,DocumentosApoyo,EsDocumentoVigente,EsVersionActualDocumento` +
+    `AreasImpactadas/Id,AreasImpactadas/Title,Accion,DocumentosApoyo,EsVersionActualDocumento` +
     `&$expand=TipoDocumento,ProcesoDeNegocio,AreaDuena,Instanciasdeaprobacion,AreasImpactadas`;
 
   return spGetJson<any>(context, url);
@@ -233,19 +247,54 @@ function buildNewSolicitudPayload(
     impactAreaIds: number[];
   }
 ): any {
+  if (!excelRow.nombreDocumento) {
+    throw new Error('El Excel no tiene NombreDocumento para crear la nueva solicitud.');
+  }
+
+  if (!excelRow.categoriaDocumento) {
+    throw new Error(`El Excel no tiene CategoriaDocumento para "${excelRow.nombreDocumento}".`);
+  }
+
+  if (!excelRow.resumen) {
+    throw new Error(`El Excel no tiene Resumen para "${excelRow.nombreDocumento}".`);
+  }
+
+  if (!excelRow.fechaAprobacion) {
+    throw new Error(`El Excel no tiene FechaDeAprobacion para "${excelRow.nombreDocumento}".`);
+  }
+
+  if (!excelRow.fechaVigencia) {
+    throw new Error(`El Excel no tiene FechaDeVigencia para "${excelRow.nombreDocumento}".`);
+  }
+
+  if (!lookups.tipoDocumentoId) {
+    throw new Error(`No se encontró TipoDocumento en lookup para "${excelRow.nombreDocumento}".`);
+  }
+
+  if (!lookups.procesoDeNegocioId) {
+    throw new Error(`No se encontró ProcesoDeNegocio en lookup para "${excelRow.nombreDocumento}".`);
+  }
+
+  if (!lookups.areaDuenaId) {
+    throw new Error(`No se encontró AreaDuena en lookup para "${excelRow.nombreDocumento}".`);
+  }
+
+  if (!lookups.instanciaAprobacionId) {
+    throw new Error(`No se encontró Instancia de Aprobación en lookup para "${excelRow.nombreDocumento}".`);
+  }
+
   const payload: any = {
-    Title: excelRow.nombreDocumento || oldSolicitud.Title || oldSolicitud.NombreDocumento || '',
+    Title: excelRow.nombreDocumento,
     Accion: 'Actualización de documentos',
-    NombreDocumento: excelRow.nombreDocumento || oldSolicitud.NombreDocumento || oldSolicitud.Title || '',
-    CategoriadeDocumento: excelRow.categoriaDocumento || oldSolicitud.CategoriadeDocumento || '',
-    ResumenDocumento: excelRow.resumen || oldSolicitud.ResumenDocumento || '',
-    FechaDeAprobacionSolicitud: excelRow.fechaAprobacion || oldSolicitud.FechaDeAprobacionSolicitud || null,
-    FechadeVigencia: excelRow.fechaVigencia || oldSolicitud.FechadeVigencia || null,
+    NombreDocumento: excelRow.nombreDocumento,
+    CategoriadeDocumento: excelRow.categoriaDocumento,
+    ResumenDocumento: excelRow.resumen,
+    FechaDeAprobacionSolicitud: excelRow.fechaAprobacion,
+    FechadeVigencia: excelRow.fechaVigencia,
     FechaDePublicacionSolicitud: new Date().toISOString(),
     FechadeEnvio: new Date().toISOString(),
     VersionDocumento: versionDocumento,
     EsVersionActualDocumento: true,
-    EsDocumentoVigente: oldSolicitud.EsDocumentoVigente,
     DocumentosApoyo: false,
     CodigoDocumento: oldSolicitud.CodigoDocumento || ''
   };
@@ -255,7 +304,9 @@ function buildNewSolicitudPayload(
   if (lookups.areaDuenaId) payload.AreaDuenaId = lookups.areaDuenaId;
   if (oldSolicitud.EstadoId) payload.EstadoId = oldSolicitud.EstadoId;
   if (lookups.instanciaAprobacionId) payload.InstanciasdeaprobacionId = lookups.instanciaAprobacionId;
-  if (lookups.impactAreaIds.length) payload.AreasImpactadasId = { results: lookups.impactAreaIds };
+  if (lookups.impactAreaIds.length) {
+    payload.AreasImpactadasId = { results: lookups.impactAreaIds };
+  }
 
   return payload;
 }
@@ -299,6 +350,7 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
   const mapInst = await buildLookupMapByField(params.context, webUrl, 'Solicitudes', 'Instanciasdeaprobacion');
   const mapImpact = await buildLookupMapByField(params.context, webUrl, 'Solicitudes', 'AreasImpactadas');
   const mapProceso = await buildProcesoCorporativoMap(params.context, webUrl);
+  const impactIsMulti = await getAllowMultipleValues(params.context, webUrl, 'Solicitudes', 'AreasImpactadas');
   const fileByName = new Map<string, string>();
   for (let i = 0; i < files.length; i++) {
     fileByName.set(String(files[i].Name || '').toLowerCase(), files[i].ServerRelativeUrl);
@@ -358,17 +410,17 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
       const impactAreaIds = impactNames
         .map((name) => mapImpact.get(name))
         .filter((value): value is number => !!value);
-      const tipoDocumentoId = mapTipoDoc.get(normKey(excelRow.tipoDocumento)) || oldSolicitud.TipoDocumentoId;
-      const procesoDeNegocioId = mapProceso.get(procesoDeNegocioKey) || oldSolicitud.ProcesoDeNegocioId;
-      const areaDuenaId = mapArea.get(normKey(excelRow.areaDuena)) || oldSolicitud.AreaDuenaId;
-      const instanciaAprobacionId = mapInst.get(normKey(excelRow.instanciaAprobacion)) || oldSolicitud.InstanciasdeaprobacionId;
-
-      await updateListItem(params.context, webUrl, 'Solicitudes', solicitudOrigenId, {
-        EsVersionActualDocumento: false
-      });
+      const tipoDocumentoId = mapTipoDoc.get(normKey(excelRow.tipoDocumento));
+      const procesoDeNegocioId = mapProceso.get(procesoDeNegocioKey);
+      const areaDuenaId = mapArea.get(normKey(excelRow.areaDuena));
+      const instanciaAprobacionId = mapInst.get(normKey(excelRow.instanciaAprobacion));
 
       if (oldSolicitudIds.indexOf(solicitudOrigenId) === -1) {
         oldSolicitudIds.push(solicitudOrigenId);
+      }
+
+      if (!impactIsMulti && impactAreaIds.length > 1) {
+        throw new Error(`El campo AreasImpactadas no admite múltiples valores para "${excelRow.nombreDocumento}".`);
       }
 
       const newSolicitudId = await addListItem(
@@ -402,21 +454,25 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
         itemId: newSolicitudId,
         originalFileName: nombreArchivo,
         fileByName,
-        titulo: excelRow.nombreDocumento || oldSolicitud.NombreDocumento || oldSolicitud.Title || nombreDocumento,
-        instanciaRaw: excelRow.instanciaAprobacion || oldSolicitud?.Instanciasdeaprobacion?.Title || '',
+        titulo: excelRow.nombreDocumento,
+        instanciaRaw: excelRow.instanciaAprobacion,
         impactAreaIds,
         dueno: duenoDocumento,
-        fechaVigencia: excelRow.fechaVigencia || oldSolicitud.FechadeVigencia || '',
-        fechaAprobacion: excelRow.fechaAprobacion || oldSolicitud.FechaDeAprobacionSolicitud || '',
-        resumen: excelRow.resumen || oldSolicitud.ResumenDocumento || '',
+        fechaVigencia: excelRow.fechaVigencia,
+        fechaAprobacion: excelRow.fechaAprobacion,
+        resumen: excelRow.resumen,
         version: versionNueva,
         codigoDocumento: oldSolicitud.CodigoDocumento || '',
-        categoriaDoc: excelRow.categoriaDocumento || oldSolicitud.CategoriadeDocumento || '',
-        tipoDocExcel: excelRow.tipoDocumento || oldSolicitud?.TipoDocumento?.Title || '',
+        categoriaDoc: excelRow.categoriaDocumento,
+        tipoDocExcel: excelRow.tipoDocumento,
         esDocumentoApoyo: false,
         tempDestinoFolderServerRelativeUrl: tempDestino,
         replaceIfExists: true,
         log
+      });
+
+      await updateListItem(params.context, webUrl, 'Solicitudes', solicitudOrigenId, {
+        EsVersionActualDocumento: false
       });
 
       if (attachResult.tempFileServerRelativeUrl) {
@@ -426,7 +482,7 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
       reportRows.push({
         SolicitudOrigenID: solicitudOrigenId,
         SolicitudID: newSolicitudId,
-        NombreDocumento: oldSolicitud.NombreDocumento || oldSolicitud.Title || nombreDocumento,
+        NombreDocumento: excelRow.nombreDocumento,
         NombreArchivo: nombreArchivo,
         CodigoDocumento: oldSolicitud.CodigoDocumento || '',
         VersionDocumento: versionNueva,
@@ -437,18 +493,18 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
         RutaTemporalWord: attachResult.tempFileServerRelativeUrl || '',
         EstadoFase1: attachResult.ok ? 'OK' : 'ERROR',
         Error: attachResult.error || '',
-        TipoDocumento: excelRow.tipoDocumento || oldSolicitud?.TipoDocumento?.Title || '',
-        CategoriaDocumento: excelRow.categoriaDocumento || oldSolicitud.CategoriadeDocumento || '',
-        Clasificaciondeproceso: excelRow.clasificacion || proceso.Title || '',
-        Macroproceso: excelRow.macroproceso || proceso.field_1 || '',
-        Proceso: excelRow.proceso || proceso.field_2 || '',
-        Subproceso: excelRow.subproceso || proceso.field_3 || '',
-        AreaDuena: excelRow.areaDuena || oldSolicitud?.AreaDuena?.Title || '',
+        TipoDocumento: excelRow.tipoDocumento,
+        CategoriaDocumento: excelRow.categoriaDocumento,
+        Clasificaciondeproceso: excelRow.clasificacion,
+        Macroproceso: excelRow.macroproceso,
+        Proceso: excelRow.proceso,
+        Subproceso: excelRow.subproceso,
+        AreaDuena: excelRow.areaDuena,
         AreaImpactada: impactNames.join(' / '),
-        Resumen: excelRow.resumen || oldSolicitud.ResumenDocumento || '',
-        FechaDeAprobacion: excelRow.fechaAprobacion || oldSolicitud.FechaDeAprobacionSolicitud || '',
-        FechaDeVigencia: excelRow.fechaVigencia || oldSolicitud.FechadeVigencia || '',
-        InstanciaDeAprobacionId: instanciaAprobacionId || oldSolicitud.InstanciasdeaprobacionId || '',
+        Resumen: excelRow.resumen,
+        FechaDeAprobacion: excelRow.fechaAprobacion,
+        FechaDeVigencia: excelRow.fechaVigencia,
+        InstanciaDeAprobacionId: instanciaAprobacionId || '',
         MetadataPendiente: 'Sí'
       });
     } catch (error) {
