@@ -1,10 +1,11 @@
 /* eslint-disable */
 // @ts-nocheck
 import { IFilePickerResult } from '@pnp/spfx-controls-react/lib/FilePicker';
+import { AadHttpClient } from '@microsoft/sp-http';
 import { WebPartContext } from '@microsoft/sp-webpart-base';
 import { fillAndAttachFromFolder } from './documentFillAndAttach.service';
 import { listFilesRecursive } from './spFolderExplorer.service';
-import { addListItem, ensureFolderPath, escapeODataValue, getAllItems, recycleFile, spGetJson, spPostJson, updateListItem } from './sharepointRest.service';
+import { addListItem, ensureFolderPath, escapeODataValue, getAllItems, recycleFile, spGetJson, spPostJson, updateListItem, uploadFileToFolder } from './sharepointRest.service';
 import { descargarReporteFase1Word, IFase1WordReportRow } from '../utils/fase1WordReportExcel';
 import { openExcelRevisionSession } from '../utils/modificacionExcelHelper';
 
@@ -401,6 +402,25 @@ async function buscarSolicitudPorNombre(context: WebPartContext, webUrl: string,
   return items.length ? items[0] : null;
 }
 
+async function buscarSolicitudReutilizableFase5(
+  context: WebPartContext,
+  webUrl: string,
+  solicitudOrigenId: number,
+  nombreDocumento: string,
+  versionDocumento: string
+): Promise<any | null> {
+  const filter =
+    `(Title eq '${String(nombreDocumento || '').replace(/'/g, `''`)}' or NombreDocumento eq '${String(nombreDocumento || '').replace(/'/g, `''`)}')` +
+    ` and VersionDocumento eq '${String(versionDocumento || '').replace(/'/g, `''`)}' and DocumentosApoyo eq 1`;
+  const url =
+    `${webUrl}/_api/web/lists/getbytitle('Solicitudes')/items` +
+    `?$select=Id,Title,NombreDocumento,VersionDocumento,DocumentosApoyo,FechaDePublicacionSolicitud` +
+    `&$orderby=Id desc&$top=10&$filter=${encodeURIComponent(filter)}`;
+  const items = await getAllItems<any>(context, url);
+  const reusable = items.find((item) => Number(item?.Id || 0) > 0 && Number(item.Id) !== solicitudOrigenId);
+  return reusable || null;
+}
+
 async function getCurrentProcessFileBySolicitudId(
   context: WebPartContext,
   webUrl: string,
@@ -504,26 +524,45 @@ async function convertOfficeFileToPdfAndUpload(params: {
   const origin = new URL(params.webUrl).origin;
   const absoluteUrl = `${origin}${params.sourceServerRelativeUrl.startsWith('/') ? '' : '/'}${params.sourceServerRelativeUrl}`;
   const shareId = buildGraphShareIdFromUrl(absoluteUrl);
-  const client = await params.context.aadHttpClientFactory.getClient('https://graph.microsoft.com');
-  const response = await client.get(`https://graph.microsoft.com/v1.0/shares/${shareId}/driveItem/content?format=pdf`, 1 as any);
-  if (!response.ok) {
-    throw new Error(`Graph PDF failed (${response.status}): ${await response.text()}`);
-  }
-  const pdfBuffer = await response.arrayBuffer();
-  const pdfBlob = new Blob([pdfBuffer], { type: 'application/pdf' });
-  await spPostJson(params.context, params.webUrl, `${params.webUrl}/_api/web/GetFolderByServerRelativePath(decodedurl='${escapeODataValue(params.destinoFolderServerRelativeUrl)}')`, undefined, 'POST');
-  await (await fetch(
-    `${params.webUrl}/_api/web/GetFolderByServerRelativePath(decodedurl='${escapeODataValue(params.destinoFolderServerRelativeUrl)}')/Files/addUsingPath(decodedurl='${escapeODataValue(params.outputPdfName)}',overwrite=false)`,
-    {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: {
-        Accept: 'application/json;odata=nometadata'
-      },
-      body: pdfBlob
+  const maxRetries = 3;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const client = await params.context.aadHttpClientFactory.getClient('https://graph.microsoft.com');
+    const response = await client.get(
+      `https://graph.microsoft.com/v1.0/shares/${shareId}/driveItem/content?format=pdf`,
+      AadHttpClient.configurations.v1
+    );
+
+    if (response.ok) {
+      const pdfBuffer = await response.arrayBuffer();
+      const pdfBlob = new Blob([pdfBuffer], { type: 'application/pdf' });
+      await uploadFileToFolder(
+        params.context,
+        params.webUrl,
+        params.destinoFolderServerRelativeUrl,
+        params.outputPdfName,
+        pdfBlob
+      );
+      params.log?.(`📄✅ Hijo publicado en PDF | ${params.outputPdfName}`);
+      return;
     }
-  ));
-  params.log?.(`📄✅ Hijo publicado en PDF | ${params.outputPdfName}`);
+
+    const body = await response.text();
+    const normalized = String(body || '').toLowerCase();
+    const retryable =
+      [401, 403, 408, 409, 423, 429, 500, 502, 503, 504].indexOf(response.status) !== -1 ||
+      normalized.indexOf('general_timeout') !== -1 ||
+      normalized.indexOf('timeout') !== -1 ||
+      normalized.indexOf('temporarily unavailable') !== -1;
+
+    if (retryable && attempt < maxRetries) {
+      params.log?.(`⚠️ Reintentando conversión PDF hijo (${attempt}/${maxRetries}) | ${params.outputPdfName} | HTTP ${response.status}`);
+      await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+      continue;
+    }
+
+    throw new Error(`Graph PDF failed (${response.status}): ${body}`);
+  }
 }
 
 async function publishNewFile(params: {
@@ -542,7 +581,15 @@ async function publishNewFile(params: {
       await copyFileByPath(params.context, params.webUrl, siblingPdfUrl, destinationFileUrl, false);
       params.log?.(`📄✅ Hijo publicado usando PDF existente | ${params.outputFileName}`);
     } else {
-      throw new Error(`No se encontró el PDF temporal del hijo. Fuente="${siblingPdfUrl}"`);
+      params.log?.(`⚠️ PDF temporal hijo no encontrado; se convertirá el Word | ${params.outputFileName}`);
+      await convertOfficeFileToPdfAndUpload({
+        context: params.context,
+        webUrl: params.webUrl,
+        sourceServerRelativeUrl: params.sourceFileUrl,
+        destinoFolderServerRelativeUrl: params.targetFolderUrl,
+        outputPdfName: params.outputFileName,
+        log: params.log
+      });
     }
   } else {
     await copyFileByPath(params.context, params.webUrl, params.sourceFileUrl, destinationFileUrl, false);
@@ -803,24 +850,38 @@ export async function ejecutarFase5HijosConPadre(params: {
       );
       log(`👨‍👧 Fase 5 | Padre resuelto por nombre | Nombre="${documentoPadre}" | SolicitudPadre=${parentSolicitud.Id}`);
 
-      const newSolicitudId = await addListItem(
+      const solicitudReutilizable = await buscarSolicitudReutilizableFase5(
         params.context,
         webUrl,
-        'Solicitudes',
-        buildNewSolicitudPayload(oldSolicitud, excelRow, versionNueva, {
-          tipoDocumentoId,
-          procesoDeNegocioId,
-          areaDuenaId,
-          instanciaAprobacionId,
-          impactAreaIds,
-          impactIsMulti,
-          docPadresFieldId,
-          docPadresIsMulti,
-          parentSolicitudIds: [Number(parentSolicitud.Id)]
-        })
+        solicitudOrigenId,
+        excelRow.nombreDocumento,
+        versionNueva
       );
 
-      createdSolicitudIds.push(newSolicitudId);
+      const newSolicitudId = solicitudReutilizable?.Id
+        ? Number(solicitudReutilizable.Id)
+        : await addListItem(
+            params.context,
+            webUrl,
+            'Solicitudes',
+            buildNewSolicitudPayload(oldSolicitud, excelRow, versionNueva, {
+              tipoDocumentoId,
+              procesoDeNegocioId,
+              areaDuenaId,
+              instanciaAprobacionId,
+              impactAreaIds,
+              impactIsMulti,
+              docPadresFieldId,
+              docPadresIsMulti,
+              parentSolicitudIds: [Number(parentSolicitud.Id)]
+            })
+          );
+
+      if (solicitudReutilizable?.Id) {
+        log(`♻️ Fase 5 | Reutilizando solicitud creada previamente | SolicitudNueva=${newSolicitudId}`);
+      } else {
+        createdSolicitudIds.push(newSolicitudId);
+      }
 
       const proceso = oldSolicitud.ProcesoDeNegocio || {};
       const tempDestino = buildDestinoWordTemp(
