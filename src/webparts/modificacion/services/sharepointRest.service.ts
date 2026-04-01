@@ -18,6 +18,41 @@ function escapeODataValue(value: string): string {
   return String(value || '').replace(/'/g, `''`);
 }
 
+function trimTrailingSlash(value: string): string {
+  return String(value || '').replace(/\/$/, '');
+}
+
+function resolveWebUrlForServerRelativePath(
+  context: WebPartContext,
+  webUrl: string,
+  serverRelativeUrl: string
+): string {
+  const currentWebUrl = trimTrailingSlash(webUrl);
+  const currentWebPath = trimTrailingSlash(new URL(currentWebUrl).pathname);
+  const siteUrl = trimTrailingSlash(context.pageContext.site.absoluteUrl || currentWebUrl);
+  const sitePath = trimTrailingSlash(new URL(siteUrl).pathname);
+  const targetPath = trimTrailingSlash(serverRelativeUrl);
+
+  if (targetPath && (targetPath === currentWebPath || targetPath.indexOf(`${currentWebPath}/`) === 0)) {
+    return currentWebUrl;
+  }
+
+  if (targetPath && (targetPath === sitePath || targetPath.indexOf(`${sitePath}/`) === 0)) {
+    return siteUrl;
+  }
+
+  return currentWebUrl;
+}
+
+function isAlreadyExistsFolderResponse(status: number, text: string): boolean {
+  if (status === 409) {
+    return true;
+  }
+
+  const normalized = String(text || '').toLowerCase();
+  return status === 400 && normalized.indexOf('ya existe un archivo o una carpeta con el nombre') !== -1;
+}
+
 async function getRequestDigest(context: WebPartContext, webUrl: string): Promise<string> {
   const now = Date.now();
   if (digestValue && now < digestExpiresAt) {
@@ -232,17 +267,21 @@ export async function ensureFolderPath(
   webUrl: string,
   folderServerRelativeUrl: string
 ): Promise<void> {
-  const digest = await getRequestDigest(context, webUrl);
-  const parts = String(folderServerRelativeUrl || '').split('/').filter(Boolean);
+  const targetWebUrl = resolveWebUrlForServerRelativePath(context, webUrl, folderServerRelativeUrl);
+  const digest = await getRequestDigest(context, targetWebUrl);
+  const normalizedFolderPath = trimTrailingSlash(folderServerRelativeUrl);
+  const targetWebPath = trimTrailingSlash(new URL(targetWebUrl).pathname);
+  const parts = normalizedFolderPath.split('/').filter(Boolean);
+  const targetWebParts = targetWebPath.split('/').filter(Boolean);
   if (!parts.length) {
     return;
   }
 
-  let currentPath = '';
-  for (let i = 0; i < parts.length; i++) {
+  let currentPath = targetWebPath || '';
+  for (let i = targetWebParts.length; i < parts.length; i++) {
     currentPath += `/${parts[i]}`;
     const url =
-      `${webUrl}/_api/web/folders/addUsingPath(decodedurl='${escapeODataValue(currentPath)}')`;
+      `${targetWebUrl}/_api/web/folders/addUsingPath(decodedurl='${escapeODataValue(currentPath)}')`;
 
     const response = await fetch(url, {
       method: 'POST',
@@ -253,8 +292,11 @@ export async function ensureFolderPath(
       }
     });
 
-    if (!response.ok && response.status !== 409) {
+    if (!response.ok) {
       const text = await safeReadText(response);
+      if (isAlreadyExistsFolderResponse(response.status, text)) {
+        continue;
+      }
       throw new Error(`No se pudo asegurar la carpeta "${currentPath}" (${response.status}): ${text || response.statusText}`);
     }
   }
@@ -268,9 +310,10 @@ export async function uploadFileToFolder(
   body: Blob
 ): Promise<string> {
   await ensureFolderPath(context, webUrl, folderServerRelativeUrl);
-  const digest = await getRequestDigest(context, webUrl);
+  const targetWebUrl = resolveWebUrlForServerRelativePath(context, webUrl, folderServerRelativeUrl);
+  const digest = await getRequestDigest(context, targetWebUrl);
   const url =
-    `${webUrl}/_api/web/GetFolderByServerRelativePath(decodedurl='${escapeODataValue(folderServerRelativeUrl)}')` +
+    `${targetWebUrl}/_api/web/GetFolderByServerRelativePath(decodedurl='${escapeODataValue(folderServerRelativeUrl)}')` +
     `/Files/addUsingPath(decodedurl='${escapeODataValue(fileName)}',overwrite=true)`;
 
   const response = await fetch(url, {

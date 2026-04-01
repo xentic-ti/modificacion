@@ -24,7 +24,9 @@ type IExcelRowData = {
   documentoPadre: string;
   versionDocumento: string;
   fechaAprobacion: string;
+  fechaAprobacionRaw: any;
   fechaVigencia: string;
+  fechaVigenciaRaw: any;
   instanciaAprobacion: string;
   flagConducta: string;
   flagExperiencia: string;
@@ -92,6 +94,10 @@ function normKey(value: any): string {
     .toLowerCase();
 }
 
+function compactKey(value: any): string {
+  return normKey(value).replace(/[^a-z0-9]/g, '');
+}
+
 function addImpactNameUnique(set: Set<string>, name: string): void {
   const key = normKey(name);
   if (key) {
@@ -128,9 +134,14 @@ async function buildLookupMapByField(
 
   const map = new Map<string, number>();
   for (let i = 0; i < items.length; i++) {
-    const key = normKey(items[i].Title);
-    if (key) {
+    const title = items[i].Title;
+    const key = normKey(title);
+    const compact = compactKey(title);
+    if (key && !map.has(key)) {
       map.set(key, items[i].Id);
+    }
+    if (compact && !map.has(compact)) {
+      map.set(compact, items[i].Id);
     }
   }
 
@@ -176,7 +187,112 @@ async function buildProcesoCorporativoMap(
   return map;
 }
 
-function parseExcelRow(row: any[]): IExcelRowData {
+function resolveLookupId(map: Map<string, number>, value: any): number | undefined {
+  const normalized = normKey(value);
+  if (normalized && map.has(normalized)) {
+    return map.get(normalized);
+  }
+
+  const compact = compactKey(value);
+  if (compact && map.has(compact)) {
+    return map.get(compact);
+  }
+
+  return undefined;
+}
+
+function parseDatePartsToIso(year: number, month: number, day: number): string {
+  const parsed = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+  if (
+    isNaN(parsed.getTime()) ||
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) {
+    throw new Error('Fecha inválida.');
+  }
+
+  return parsed.toISOString();
+}
+
+function parseLooseSlashDateToIso(raw: string): string | null {
+  const match = raw.match(
+    /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/
+  );
+  if (!match) {
+    return null;
+  }
+
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3].length === 2 ? `20${match[3]}` : match[3]);
+  return parseDatePartsToIso(year, month, day);
+}
+
+function excelSerialToIso(serialValue: number): string {
+  const serialText = String(serialValue);
+  const wholeDays = Number(serialText.split('.')[0] || serialText);
+  const parsed = new Date(Date.UTC(1899, 11, 30 + wholeDays, 0, 0, 0));
+  if (isNaN(parsed.getTime())) {
+    throw new Error('Fecha serial de Excel inválida.');
+  }
+
+  return parsed.toISOString();
+}
+
+function normalizeExcelDateForSharePoint(value: any, fieldLabel: string, documentName: string): string {
+  if (value === null || value === undefined) {
+    throw new Error(`El Excel no tiene ${fieldLabel} para "${documentName}".`);
+  }
+
+  if (typeof value === 'number' && !isNaN(value)) {
+    return excelSerialToIso(value);
+  }
+
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return new Date(Date.UTC(value.getFullYear(), value.getMonth(), value.getDate(), 0, 0, 0)).toISOString();
+  }
+
+  const raw = String(value).trim();
+  if (!raw) {
+    throw new Error(`El Excel no tiene ${fieldLabel} para "${documentName}".`);
+  }
+
+  const normalizedRaw = raw.replace(',', '.');
+
+  const looseSlashDate = parseLooseSlashDateToIso(normalizedRaw);
+  if (looseSlashDate) {
+    return looseSlashDate;
+  }
+
+  const ymd = normalizedRaw.match(
+    /^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/
+  );
+  if (ymd) {
+    return parseDatePartsToIso(Number(ymd[1]), Number(ymd[2]), Number(ymd[3]));
+  }
+
+  const serial = Number(normalizedRaw);
+  if (!isNaN(serial) && serial > 0 && /^\d+(\.\d+)?$/.test(normalizedRaw)) {
+    return excelSerialToIso(serial);
+  }
+
+  const parsed = new Date(normalizedRaw);
+  if (!isNaN(parsed.getTime())) {
+    return new Date(Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 0, 0, 0)).toISOString();
+  }
+
+  throw new Error(`Formato inválido en ${fieldLabel} para "${documentName}": "${raw}".`);
+}
+
+function formatLogValue(value: any): string {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (value instanceof Date) return isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+  return String(value);
+}
+
+function parseExcelRow(row: any[], rawRow?: any[]): IExcelRowData {
   return {
     clasificacion: String(row[0] || '').trim(),
     macroproceso: String(row[1] || '').trim(),
@@ -191,7 +307,9 @@ function parseExcelRow(row: any[]): IExcelRowData {
     documentoPadre: String(row[10] || '').trim(),
     versionDocumento: String(row[11] || '').trim(),
     fechaAprobacion: String(row[12] || '').trim(),
+    fechaAprobacionRaw: rawRow ? rawRow[12] : row[12],
     fechaVigencia: String(row[13] || '').trim(),
+    fechaVigenciaRaw: rawRow ? rawRow[13] : row[13],
     instanciaAprobacion: String(row[14] || '').trim(),
     flagConducta: String(row[15] || '').trim(),
     flagExperiencia: String(row[16] || '').trim(),
@@ -212,11 +330,11 @@ function buildImpactNames(excelRow: IExcelRowData): string[] {
   }
 
   if (isSi(excelRow.flagConducta)) {
-    addImpactNameUnique(impactSet, 'Conducta de Mercado');
+    addImpactNameUnique(impactSet, 'Impacto en Conducta de Mercado');
   }
 
   if (isSi(excelRow.flagExperiencia)) {
-    addImpactNameUnique(impactSet, 'Experiencia del Cliente');
+    addImpactNameUnique(impactSet, 'Impacto en Experiencia del Cliente');
   }
 
   return Array.from(impactSet);
@@ -245,6 +363,7 @@ function buildNewSolicitudPayload(
     areaDuenaId?: number;
     instanciaAprobacionId?: number;
     impactAreaIds: number[];
+    impactIsMulti: boolean;
   }
 ): any {
   if (!excelRow.nombreDocumento) {
@@ -268,7 +387,9 @@ function buildNewSolicitudPayload(
   }
 
   if (!lookups.tipoDocumentoId) {
-    throw new Error(`No se encontró TipoDocumento en lookup para "${excelRow.nombreDocumento}".`);
+    throw new Error(
+      `No se encontró TipoDocumento en lookup para "${excelRow.nombreDocumento}". Valor Excel="${excelRow.tipoDocumento}".`
+    );
   }
 
   if (!lookups.procesoDeNegocioId) {
@@ -279,18 +400,22 @@ function buildNewSolicitudPayload(
     throw new Error(`No se encontró AreaDuena en lookup para "${excelRow.nombreDocumento}".`);
   }
 
-  if (!lookups.instanciaAprobacionId) {
-    throw new Error(`No se encontró Instancia de Aprobación en lookup para "${excelRow.nombreDocumento}".`);
-  }
-
   const payload: any = {
     Title: excelRow.nombreDocumento,
-    Accion: 'Actualización de documentos',
+    Accion: 'Actualización de documento',
     NombreDocumento: excelRow.nombreDocumento,
     CategoriadeDocumento: excelRow.categoriaDocumento,
     ResumenDocumento: excelRow.resumen,
-    FechaDeAprobacionSolicitud: excelRow.fechaAprobacion,
-    FechadeVigencia: excelRow.fechaVigencia,
+    FechaDeAprobacionSolicitud: normalizeExcelDateForSharePoint(
+      excelRow.fechaAprobacionRaw,
+      'FechaDeAprobacion',
+      excelRow.nombreDocumento
+    ),
+    FechadeVigencia: normalizeExcelDateForSharePoint(
+      excelRow.fechaVigenciaRaw,
+      'FechaDeVigencia',
+      excelRow.nombreDocumento
+    ),
     FechaDePublicacionSolicitud: new Date().toISOString(),
     FechadeEnvio: new Date().toISOString(),
     VersionDocumento: versionDocumento,
@@ -305,7 +430,9 @@ function buildNewSolicitudPayload(
   if (oldSolicitud.EstadoId) payload.EstadoId = oldSolicitud.EstadoId;
   if (lookups.instanciaAprobacionId) payload.InstanciasdeaprobacionId = lookups.instanciaAprobacionId;
   if (lookups.impactAreaIds.length) {
-    payload.AreasImpactadasId = { results: lookups.impactAreaIds };
+    payload.AreasImpactadasId = lookups.impactIsMulti
+      ? lookups.impactAreaIds
+      : lookups.impactAreaIds[0];
   }
 
   return payload;
@@ -331,6 +458,7 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
   const webUrl = params.context.pageContext.web.absoluteUrl;
   const session = await openExcelRevisionSession(params.excelFile);
   const grid = session.grid || [];
+  const rawGrid = session.rawGrid || [];
   if (!grid.length) {
     throw new Error('El Excel está vacío.');
   }
@@ -363,7 +491,8 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
 
   for (let rowIndex = 1; rowIndex < grid.length; rowIndex++) {
     const row = grid[rowIndex] || [];
-    const excelRow = parseExcelRow(row);
+    const rawRow = rawGrid[rowIndex] || row;
+    const excelRow = parseExcelRow(row, rawRow);
     const solicitudOrigenId = Number(row[idxSolicitud] || 0);
     const nombreArchivo = excelRow.nombreArchivo;
     const nombreDocumento = excelRow.nombreDocumento;
@@ -410,10 +539,11 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
       const impactAreaIds = impactNames
         .map((name) => mapImpact.get(name))
         .filter((value): value is number => !!value);
-      const tipoDocumentoId = mapTipoDoc.get(normKey(excelRow.tipoDocumento));
+      const tipoDocumentoId = resolveLookupId(mapTipoDoc, excelRow.tipoDocumento);
       const procesoDeNegocioId = mapProceso.get(procesoDeNegocioKey);
-      const areaDuenaId = mapArea.get(normKey(excelRow.areaDuena));
-      const instanciaAprobacionId = mapInst.get(normKey(excelRow.instanciaAprobacion));
+      const areaDuenaId = resolveLookupId(mapArea, excelRow.areaDuena);
+      const instanciaAprobacionId = resolveLookupId(mapInst, excelRow.instanciaAprobacion);
+      const instanciaAprobacionDoc = instanciaAprobacionId ? excelRow.instanciaAprobacion : 'Gerencia de Área';
 
       if (oldSolicitudIds.indexOf(solicitudOrigenId) === -1) {
         oldSolicitudIds.push(solicitudOrigenId);
@@ -422,6 +552,12 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
       if (!impactIsMulti && impactAreaIds.length > 1) {
         throw new Error(`El campo AreasImpactadas no admite múltiples valores para "${excelRow.nombreDocumento}".`);
       }
+
+      log(
+        `🗓️ Fechas Fase 1 | SolicitudOrigen=${solicitudOrigenId} | ` +
+        `FechaAprobacionRaw="${formatLogValue(excelRow.fechaAprobacionRaw)}" | ` +
+        `FechaVigenciaRaw="${formatLogValue(excelRow.fechaVigenciaRaw)}"`
+      );
 
       const newSolicitudId = await addListItem(
         params.context,
@@ -432,7 +568,8 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
           procesoDeNegocioId,
           areaDuenaId,
           instanciaAprobacionId,
-          impactAreaIds
+          impactAreaIds,
+          impactIsMulti
         })
       );
 
@@ -447,6 +584,8 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
         excelRow.subproceso || proceso.field_3 || ''
       );
 
+      log(`📂 TEMP destino calculado | SolicitudOrigen=${solicitudOrigenId} | ${tempDestino}`);
+
       const attachResult = await fillAndAttachFromFolder({
         context: params.context,
         webUrl,
@@ -455,7 +594,7 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
         originalFileName: nombreArchivo,
         fileByName,
         titulo: excelRow.nombreDocumento,
-        instanciaRaw: excelRow.instanciaAprobacion,
+        instanciaRaw: instanciaAprobacionDoc,
         impactAreaIds,
         dueno: duenoDocumento,
         fechaVigencia: excelRow.fechaVigencia,
@@ -524,7 +663,11 @@ export async function ejecutarFase1DocumentosSinHijosNiFlujos(params: {
         EstadoFase1: 'ERROR',
         Error: message
       });
-      log(`❌ Error Fase 1 | SolicitudOrigen=${solicitudOrigenId} | ${message}`);
+      log(
+        `❌ Error Fase 1 | SolicitudOrigen=${solicitudOrigenId} | ` +
+        `FechaAprobacionRaw="${formatLogValue(excelRow.fechaAprobacionRaw)}" | ` +
+        `FechaVigenciaRaw="${formatLogValue(excelRow.fechaVigenciaRaw)}" | ${message}`
+      );
     }
   }
 

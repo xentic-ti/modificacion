@@ -30,6 +30,11 @@ export interface IFase1WordReportRow {
   FechaDeVigencia?: string;
   InstanciaDeAprobacionId?: number | '';
   MetadataPendiente?: string;
+  DocumentosHijosIDs?: string;
+  DocumentosHijosNombres?: string;
+  DocumentoPadreSolicitudAnteriorID?: number | '';
+  DocumentoPadreSolicitudNuevaID?: number | '';
+  DiagramasFlujoNombres?: string;
 }
 
 const headers = [
@@ -59,7 +64,12 @@ const headers = [
   'FechaDeAprobacion',
   'FechaDeVigencia',
   'InstanciaDeAprobacionId',
-  'MetadataPendiente'
+  'MetadataPendiente',
+  'DocumentosHijosIDs',
+  'DocumentosHijosNombres',
+  'DocumentoPadreSolicitudAnteriorID',
+  'DocumentoPadreSolicitudNuevaID',
+  'DiagramasFlujoNombres'
 ];
 
 function autoFitColumns(rows: IFase1WordReportRow[]): Array<{ wch: number; }> {

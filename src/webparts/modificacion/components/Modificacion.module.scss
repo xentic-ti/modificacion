@@ -92,10 +92,19 @@
 .sideDescription,
 .logDescription,
 .statusValue,
-.uploadHint {
+.uploadHint,
+.rollbackInfo {
   display: block;
   line-height: 1.5;
   color: #4f6b63;
+}
+
+.rollbackInfo {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #f3f8f5;
+  border: 1px solid #d8e8df;
+  font-weight: 600;
 }
 
 .uploadPanel {

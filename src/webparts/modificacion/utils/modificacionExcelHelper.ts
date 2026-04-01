@@ -12,6 +12,7 @@ export interface IExcelRevisionSession {
   workbook: XLSX.WorkBook;
   sheetName: string;
   grid: any[][];
+  rawGrid: any[][];
   rows: IExcelRevisionRow[];
 }
 
@@ -33,6 +34,11 @@ export async function openExcelRevisionSession(file: IFilePickerResult): Promise
     defval: '',
     raw: false
   }) as any[][];
+  const rawGrid = XLSX.utils.sheet_to_json(worksheet, {
+    header: 1,
+    defval: '',
+    raw: true
+  }) as any[][];
   const rows = buildRevisionRows(grid);
 
   return {
@@ -40,6 +46,7 @@ export async function openExcelRevisionSession(file: IFilePickerResult): Promise
     workbook,
     sheetName,
     grid,
+    rawGrid,
     rows
   };
 }
@@ -80,6 +87,7 @@ export async function buildReviewedWorkbook(
   });
 
   const newWorksheet = XLSX.utils.aoa_to_sheet(grid);
+  forceDateColumnsAsDdMmYyyy(newWorksheet, session, grid.length);
   session.workbook.Sheets[session.sheetName] = newWorksheet;
 
   const output = XLSX.write(session.workbook, {
@@ -90,6 +98,84 @@ export async function buildReviewedWorkbook(
   return new Blob([output], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   });
+}
+
+function forceDateColumnsAsDdMmYyyy(
+  worksheet: XLSX.WorkSheet,
+  session: IExcelRevisionSession,
+  totalRows: number
+): void {
+  const dateColumns = [12, 13];
+
+  for (let rowIndex = 1; rowIndex < totalRows; rowIndex++) {
+    for (let i = 0; i < dateColumns.length; i++) {
+      const columnIndex = dateColumns[i];
+      const rawValue = session.rawGrid[rowIndex]?.[columnIndex];
+      const displayValue = session.grid[rowIndex]?.[columnIndex];
+      const normalized = normalizeDateToDdMmYyyy(rawValue, displayValue);
+
+      if (!normalized) {
+        continue;
+      }
+
+      const address = XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex });
+      worksheet[address] = {
+        t: 's',
+        v: normalized,
+        w: normalized,
+        z: '@'
+      } as XLSX.CellObject;
+    }
+  }
+}
+
+function normalizeDateToDdMmYyyy(rawValue: any, displayValue: any): string {
+  const fromRaw = normalizeDateValue(rawValue);
+  if (fromRaw) {
+    return fromRaw;
+  }
+
+  return normalizeDateValue(displayValue);
+}
+
+function normalizeDateValue(value: any): string {
+  if (value === null || value === undefined || value === '') {
+    return '';
+  }
+
+  if (typeof value === 'number' && !isNaN(value)) {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed) {
+      return `${String(parsed.d).padStart(2, '0')}/${String(parsed.m).padStart(2, '0')}/${parsed.y}`;
+    }
+  }
+
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return `${String(value.getDate()).padStart(2, '0')}/${String(value.getMonth() + 1).padStart(2, '0')}/${value.getFullYear()}`;
+  }
+
+  const raw = String(value).trim();
+  if (!raw) {
+    return '';
+  }
+
+  const ddmmyyyy = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/);
+  if (ddmmyyyy) {
+    const day = ddmmyyyy[1].padStart(2, '0');
+    const month = ddmmyyyy[2].padStart(2, '0');
+    const year = ddmmyyyy[3].length === 2 ? `20${ddmmyyyy[3]}` : ddmmyyyy[3];
+    return `${day}/${month}/${year}`;
+  }
+
+  const iso = raw.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:[T\s]+\d{1,2}:\d{2}(?::\d{2})?)?$/);
+  if (iso) {
+    const year = iso[1];
+    const month = iso[2].padStart(2, '0');
+    const day = iso[3].padStart(2, '0');
+    return `${day}/${month}/${year}`;
+  }
+
+  return raw;
 }
 
 export function buildReviewedFileName(fileName: string): string {

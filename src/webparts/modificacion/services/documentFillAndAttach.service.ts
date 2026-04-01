@@ -56,11 +56,19 @@ function excelToDDMMYYYY(value: any): string {
   const raw = String(value).trim();
   if (!raw) return '';
 
-  const match = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  const match = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/);
   if (match) {
     const day = match[1].padStart(2, '0');
     const month = match[2].padStart(2, '0');
     const year = match[3].length === 2 ? `20${match[3]}` : match[3];
+    return `${day}/${month}/${year}`;
+  }
+
+  const isoMatch = raw.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:[T\s]+\d{1,2}:\d{2}(?::\d{2})?)?$/);
+  if (isoMatch) {
+    const year = isoMatch[1];
+    const month = isoMatch[2].padStart(2, '0');
+    const day = isoMatch[3].padStart(2, '0');
     return `${day}/${month}/${year}`;
   }
 
