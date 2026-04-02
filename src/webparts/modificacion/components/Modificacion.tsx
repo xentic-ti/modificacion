@@ -18,6 +18,7 @@ import { FolderPicker } from '@pnp/spfx-controls-react/lib/FolderPicker';
 import styles from './Modificacion.module.scss';
 import type { IModificacionProps } from './IModificacionProps';
 import { revisarExcelModificacion } from '../services/modificacionRevision.service';
+import { buscarSolicitudesDuplicadas } from '../services/solicitudesDuplicadas.service';
 import { ejecutarFase1DocumentosSinHijosNiFlujos } from '../services/modificacionFase1.service';
 import { rollbackModificacionFase1 } from '../services/modificacionFase1Rollback.service';
 import { IFase2RollbackEntry, ejecutarFase2PublicacionDocumentosSinHijos } from '../services/modificacionFase2Publicacion.service';
@@ -27,6 +28,13 @@ import { rollbackModificacionFase3 } from '../services/modificacionFase3Rollback
 import { ejecutarFase4PublicacionHijos } from '../services/modificacionFase4Hijos.service';
 import { ejecutarFase5HijosConPadre } from '../services/modificacionFase5HijosConPadre.service';
 import { ejecutarFase6BajaDocumentos } from '../services/modificacionFase6Baja.service';
+import { IFase6RollbackDiagramEntry, IFase6RollbackEntry, rollbackModificacionFase6 } from '../services/modificacionFase6Rollback.service';
+import { ejecutarFase7ModificacionDiagramas } from '../services/modificacionFase7Diagrama.service';
+import { IFase7RollbackEntry, rollbackModificacionFase7 } from '../services/modificacionFase7Rollback.service';
+import { ejecutarFase8AltaDiagramaSolicitud } from '../services/modificacionFase8AltaDiagrama.service';
+import { ejecutarFase9BajaDiagramaSolicitud } from '../services/modificacionFase9BajaDiagrama.service';
+import { ejecutarCorreccionSolicitud2460 } from '../services/modificacionCorreccion2460.service';
+import { IFase8RollbackEntry, rollbackModificacionFase8 } from '../services/modificacionFase8Rollback.service';
 
 const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, isDarkTheme }) => {
   const [excelFile, setExcelFile] = React.useState<IFilePickerResult | null>(null);
@@ -39,7 +47,12 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
   const [fase2RollbackEntries, setFase2RollbackEntries] = React.useState<IFase2RollbackEntry[]>([]);
   const [fase3RollbackEntries, setFase3RollbackEntries] = React.useState<IFase3RollbackEntry[]>([]);
   const [fase4RollbackEntries, setFase4RollbackEntries] = React.useState<IFase2RollbackEntry[]>([]);
-  const [lastExecutedPhase, setLastExecutedPhase] = React.useState<'fase1' | 'fase2' | 'fase3' | 'fase4' | null>(null);
+  const [fase6RollbackEntries, setFase6RollbackEntries] = React.useState<IFase6RollbackEntry[]>([]);
+  const [fase6DiagramRollbackEntries, setFase6DiagramRollbackEntries] = React.useState<IFase6RollbackDiagramEntry[]>([]);
+  const [fase7RollbackEntries, setFase7RollbackEntries] = React.useState<IFase7RollbackEntry[]>([]);
+  const [fase8RollbackEntries, setFase8RollbackEntries] = React.useState<IFase8RollbackEntry[]>([]);
+  const [fase9RollbackEntries, setFase9RollbackEntries] = React.useState<IFase8RollbackEntry[]>([]);
+  const [lastExecutedPhase, setLastExecutedPhase] = React.useState<'fase1' | 'fase2' | 'fase3' | 'fase4' | 'fase6' | 'fase7' | 'fase8' | 'fase9' | 'correccion2460' | null>(null);
   const [logRevision, setLogRevision] = React.useState<string>(
     'Panel de revisión listo.\nEsperando la selección de un archivo Excel de modificación.'
   );
@@ -66,6 +79,11 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
     setFase2RollbackEntries([]);
     setFase3RollbackEntries([]);
     setFase4RollbackEntries([]);
+    setFase6RollbackEntries([]);
+    setFase6DiagramRollbackEntries([]);
+    setFase7RollbackEntries([]);
+    setFase8RollbackEntries([]);
+    setFase9RollbackEntries([]);
     setLastExecutedPhase(null);
     setError(null);
     setLogRevision([
@@ -119,6 +137,32 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
   const revisarArchivo = React.useCallback((): void => {
     void ejecutarRevision();
   }, [ejecutarRevision]);
+
+  const ejecutarBusquedaSolicitudesDuplicadas = React.useCallback(async (): Promise<void> => {
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando busqueda de solicitudes duplicadas...');
+
+    try {
+      const resultado = await buscarSolicitudesDuplicadas({
+        context,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog('✅ Busqueda terminada. Solicitudes analizadas: ' + resultado.totalSolicitudes);
+      appendLog('⚠️ Grupos duplicados: ' + resultado.duplicatedGroups);
+      appendLog('⚠️ Solicitudes duplicadas exportadas: ' + resultado.duplicatedRows);
+      appendLog('ℹ️ Solicitudes no vigentes dentro del reporte: ' + resultado.nonCurrentRows);
+      appendLog('📥 Archivo generado: ' + resultado.fileName);
+    } catch (searchError) {
+      const errorMessage = searchError instanceof Error ? searchError.message : String(searchError);
+      setError(errorMessage);
+      appendLog('❌ Error al buscar solicitudes duplicadas: ' + errorMessage);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, descargarArchivo]);
 
   const ejecutarFase1 = React.useCallback(async (): Promise<void> => {
     if (!excelFile) {
@@ -259,6 +303,168 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       return;
     }
 
+    if (lastExecutedPhase === 'fase6') {
+      if (!fase6RollbackEntries.length && !fase6DiagramRollbackEntries.length) {
+        setError('No hay resultados exitosos de Fase 6 para revertir.');
+        appendLog('ℹ️ Rollback de Fase 6 omitido: no hubo bajas exitosas para revertir.');
+        return;
+      }
+
+      setError(null);
+      setIsRunning(true);
+      appendLog('🧨 Iniciando rollback de Fase 6...');
+
+      try {
+        await rollbackModificacionFase6({
+          context,
+          webUrl: context.pageContext.web.absoluteUrl,
+          entries: fase6RollbackEntries,
+          diagramEntries: fase6DiagramRollbackEntries,
+          log: appendLog
+        });
+
+        setFase6RollbackEntries([]);
+        setFase6DiagramRollbackEntries([]);
+        setLastExecutedPhase(null);
+        appendLog('✅ Rollback de Fase 6 finalizado.');
+      } catch (rollbackError) {
+        const errorMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        setError(errorMessage);
+        appendLog(`❌ Error durante el rollback de Fase 6: ${errorMessage}`);
+      } finally {
+        setIsRunning(false);
+      }
+      return;
+    }
+
+    if (lastExecutedPhase === 'fase7') {
+      if (!fase7RollbackEntries.length) {
+        setError('No hay resultados exitosos de Fase 7 para revertir.');
+        appendLog('ℹ️ Rollback de Fase 7 omitido: no hubo diagramas reemplazados para revertir.');
+        return;
+      }
+
+      setError(null);
+      setIsRunning(true);
+      appendLog('🧨 Iniciando rollback de Fase 7...');
+
+      try {
+        await rollbackModificacionFase7({
+          context,
+          webUrl: context.pageContext.web.absoluteUrl,
+          entries: fase7RollbackEntries,
+          log: appendLog
+        });
+
+        setFase7RollbackEntries([]);
+        setLastExecutedPhase(null);
+        appendLog('✅ Rollback de Fase 7 finalizado.');
+      } catch (rollbackError) {
+        const errorMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        setError(errorMessage);
+        appendLog(`❌ Error durante el rollback de Fase 7: ${errorMessage}`);
+      } finally {
+        setIsRunning(false);
+      }
+      return;
+    }
+
+    if (lastExecutedPhase === 'fase8') {
+      if (!fase8RollbackEntries.length) {
+        setError('No hay resultados exitosos de Fase 8 para revertir.');
+        appendLog('ℹ️ Rollback de Fase 8 omitido: no hubo altas exitosas para revertir.');
+        return;
+      }
+
+      setError(null);
+      setIsRunning(true);
+      appendLog('🧨 Iniciando rollback de Fase 8...');
+
+      try {
+        await rollbackModificacionFase8({
+          context,
+          webUrl: context.pageContext.web.absoluteUrl,
+          entries: fase8RollbackEntries,
+          log: appendLog
+        });
+
+        setFase8RollbackEntries([]);
+        setLastExecutedPhase(null);
+        appendLog('✅ Rollback de Fase 8 finalizado.');
+      } catch (rollbackError) {
+        const errorMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        setError(errorMessage);
+        appendLog(`❌ Error durante el rollback de Fase 8: ${errorMessage}`);
+      } finally {
+        setIsRunning(false);
+      }
+      return;
+    }
+
+    if (lastExecutedPhase === 'correccion2460') {
+      if (!fase8RollbackEntries.length) {
+        setError('No hay resultados exitosos de la corrección 2460 para revertir.');
+        appendLog('ℹ️ Rollback de corrección 2460 omitido: no hubo cambios exitosos para revertir.');
+        return;
+      }
+
+      setError(null);
+      setIsRunning(true);
+      appendLog('🧨 Iniciando rollback de corrección 2460...');
+
+      try {
+        await rollbackModificacionFase8({
+          context,
+          webUrl: context.pageContext.web.absoluteUrl,
+          entries: fase8RollbackEntries,
+          log: appendLog
+        });
+
+        setFase8RollbackEntries([]);
+        setLastExecutedPhase(null);
+        appendLog('✅ Rollback de corrección 2460 finalizado.');
+      } catch (rollbackError) {
+        const errorMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        setError(errorMessage);
+        appendLog(`❌ Error durante el rollback de corrección 2460: ${errorMessage}`);
+      } finally {
+        setIsRunning(false);
+      }
+      return;
+    }
+
+    if (lastExecutedPhase === 'fase9') {
+      if (!fase9RollbackEntries.length) {
+        setError('No hay resultados exitosos de Fase 9 para revertir.');
+        appendLog('ℹ️ Rollback de Fase 9 omitido: no hubo bajas exitosas para revertir.');
+        return;
+      }
+
+      setError(null);
+      setIsRunning(true);
+      appendLog('🧨 Iniciando rollback de Fase 9...');
+
+      try {
+        await rollbackModificacionFase8({
+          context,
+          webUrl: context.pageContext.web.absoluteUrl,
+          entries: fase9RollbackEntries,
+          log: appendLog
+        });
+
+        setFase9RollbackEntries([]);
+        setLastExecutedPhase(null);
+        appendLog('✅ Rollback de Fase 9 finalizado.');
+      } catch (rollbackError) {
+        const errorMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        setError(errorMessage);
+        appendLog(`❌ Error durante el rollback de Fase 9: ${errorMessage}`);
+      } finally {
+        setIsRunning(false);
+      }
+      return;
+    }
+
     if (!createdSolicitudIds.length && !oldSolicitudIds.length && !tempFileUrls.length) {
       setError('No hay resultados de Fase 1 para revertir.');
       return;
@@ -290,7 +496,7 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
     } finally {
       setIsRunning(false);
     }
-  }, [appendLog, context, createdSolicitudIds, fase2RollbackEntries, fase3RollbackEntries, fase4RollbackEntries, lastExecutedPhase, oldSolicitudIds, tempFileUrls]);
+  }, [appendLog, context, createdSolicitudIds, fase2RollbackEntries, fase3RollbackEntries, fase4RollbackEntries, fase6DiagramRollbackEntries, fase6RollbackEntries, fase7RollbackEntries, fase8RollbackEntries, fase9RollbackEntries, lastExecutedPhase, oldSolicitudIds, tempFileUrls]);
 
   const ejecutarFase2 = React.useCallback(async (): Promise<void> => {
     if (!excelFile) {
@@ -312,6 +518,10 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       setFase2RollbackEntries(resultado.rollbackEntries);
       setFase3RollbackEntries([]);
       setFase4RollbackEntries([]);
+      setFase6RollbackEntries([]);
+      setFase6DiagramRollbackEntries([]);
+      setFase7RollbackEntries([]);
+      setFase8RollbackEntries([]);
       setLastExecutedPhase('fase2');
       appendLog(`✅ Fase 2 terminada. Procesados=${resultado.processed}`);
       appendLog(`✅ OK=${resultado.ok} | SKIP=${resultado.skipped} | ERROR=${resultado.error}`);
@@ -352,6 +562,10 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       setFase3RollbackEntries(resultado.rollbackEntries);
       setFase2RollbackEntries([]);
       setFase4RollbackEntries([]);
+      setFase6RollbackEntries([]);
+      setFase6DiagramRollbackEntries([]);
+      setFase7RollbackEntries([]);
+      setFase8RollbackEntries([]);
       setLastExecutedPhase('fase3');
       appendLog(`✅ Fase 3 terminada. Procesados=${resultado.processed}`);
       appendLog(`✅ OK=${resultado.ok} | SKIP=${resultado.skipped} | ERROR=${resultado.error}`);
@@ -387,6 +601,10 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       setFase4RollbackEntries(resultado.rollbackEntries);
       setFase2RollbackEntries([]);
       setFase3RollbackEntries([]);
+      setFase6RollbackEntries([]);
+      setFase6DiagramRollbackEntries([]);
+      setFase7RollbackEntries([]);
+      setFase8RollbackEntries([]);
       setLastExecutedPhase('fase4');
       appendLog(`✅ Fase 4 terminada. Procesados=${resultado.processed}`);
       appendLog(`✅ OK=${resultado.ok} | SKIP=${resultado.skipped} | ERROR=${resultado.error}`);
@@ -431,6 +649,9 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       setFase2RollbackEntries([]);
       setFase3RollbackEntries([]);
       setFase4RollbackEntries([]);
+      setFase6RollbackEntries([]);
+      setFase6DiagramRollbackEntries([]);
+      setFase7RollbackEntries([]);
       setLastExecutedPhase(null);
 
       appendLog(`✅ Fase 5 terminada. Procesados=${resultado.processed}`);
@@ -471,14 +692,203 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       setFase2RollbackEntries([]);
       setFase3RollbackEntries([]);
       setFase4RollbackEntries([]);
-      setLastExecutedPhase(null);
+      setFase7RollbackEntries([]);
+      setFase8RollbackEntries([]);
+      setFase6RollbackEntries(resultado.rollbackEntries);
+      setFase6DiagramRollbackEntries(resultado.diagramRollbackEntries);
+      setLastExecutedPhase('fase6');
       appendLog(`✅ Fase 6 terminada. Procesados=${resultado.processed}`);
       appendLog(`✅ OK=${resultado.ok} | SKIP=${resultado.skipped} | ERROR=${resultado.error}`);
-      appendLog('ℹ️ Fase 6 no genera nuevas solicitudes ni rollback automático.');
+      appendLog(`📄 Registros rollback Fase 6=${resultado.rollbackEntries.length}`);
+      appendLog(`🧭 Diagramas respaldados Fase 6=${resultado.diagramRollbackEntries.length}`);
+      appendLog(`📥 Excel final generado: ${resultado.reportFileName}`);
     } catch (fase6Error) {
       const errorMessage = fase6Error instanceof Error ? fase6Error.message : String(fase6Error);
       setError(errorMessage);
       appendLog(`❌ Error en Fase 6: ${errorMessage}`);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, excelFile]);
+
+  const ejecutarFase7 = React.useCallback(async (): Promise<void> => {
+    if (!excelFile) {
+      setError('Debes seleccionar el Excel revisado antes de ejecutar la Fase 7.');
+      return;
+    }
+
+    if (!sourceFolderUrl) {
+      setError('Debes seleccionar la carpeta SharePoint donde están los archivos BPM origen.');
+      return;
+    }
+
+    setError(null);
+    setIsRunning(true);
+    setLogRevision(`Iniciando Fase 7 para el archivo: ${excelFile.fileName}`);
+
+    try {
+      const resultado = await ejecutarFase7ModificacionDiagramas({
+        context,
+        excelFile,
+        sourceFolderServerRelativeUrl: sourceFolderUrl,
+        log: appendLog
+      });
+
+      setCreatedSolicitudIds([]);
+      setOldSolicitudIds([]);
+      setTempFileUrls([]);
+      setFase2RollbackEntries([]);
+      setFase3RollbackEntries([]);
+      setFase4RollbackEntries([]);
+      setFase6RollbackEntries([]);
+      setFase6DiagramRollbackEntries([]);
+      setFase8RollbackEntries([]);
+      setFase9RollbackEntries([]);
+      setFase7RollbackEntries(resultado.rollbackEntries);
+      setLastExecutedPhase('fase7');
+      appendLog(`✅ Fase 7 terminada. Procesados=${resultado.processed}`);
+      appendLog(`✅ OK=${resultado.ok} | SKIP=${resultado.skipped} | ERROR=${resultado.error}`);
+      appendLog(`📄 Registros rollback Fase 7=${resultado.rollbackEntries.length}`);
+      appendLog(`📥 Excel final generado: ${resultado.reportFileName}`);
+    } catch (fase7Error) {
+      const errorMessage = fase7Error instanceof Error ? fase7Error.message : String(fase7Error);
+      setError(errorMessage);
+      appendLog(`❌ Error en Fase 7: ${errorMessage}`);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, excelFile, sourceFolderUrl]);
+
+  const ejecutarFase8 = React.useCallback(async (): Promise<void> => {
+    if (!excelFile) {
+      setError('Debes seleccionar el Excel revisado antes de ejecutar la Fase 8.');
+      return;
+    }
+
+    if (!sourceFolderUrl) {
+      setError('Debes seleccionar la carpeta SharePoint donde están los archivos BPM origen.');
+      return;
+    }
+
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando Fase 8 para el archivo: ' + excelFile.fileName);
+
+    try {
+      const resultado = await ejecutarFase8AltaDiagramaSolicitud({
+        context,
+        excelFile,
+        sourceFolderServerRelativeUrl: sourceFolderUrl,
+        log: appendLog
+      });
+
+      setCreatedSolicitudIds([]);
+      setOldSolicitudIds([]);
+      setTempFileUrls([]);
+      setFase2RollbackEntries([]);
+      setFase3RollbackEntries([]);
+      setFase4RollbackEntries([]);
+      setFase6RollbackEntries([]);
+      setFase6DiagramRollbackEntries([]);
+      setFase7RollbackEntries([]);
+      setFase8RollbackEntries(resultado.rollbackEntries);
+      setFase9RollbackEntries([]);
+      setLastExecutedPhase('fase8');
+
+      appendLog('✅ Fase 8 terminada. Procesados=' + resultado.processed);
+      appendLog('✅ OK=' + resultado.ok + ' | SKIP=' + resultado.skipped + ' | ERROR=' + resultado.error);
+      appendLog('📄 Registros rollback Fase 8=' + resultado.rollbackEntries.length);
+      appendLog('📥 Excel final generado: ' + resultado.reportFileName);
+      appendLog('ℹ️ Fase 8 versiona la solicitud padre vigente, crea el nuevo diagrama, regenera el Word y publica nuevamente en Procesos.');
+      appendLog('ℹ️ El rollback de Fase 8 restaura solicitud vigente, relaciones, diagramas y publicación en Procesos.');
+    } catch (fase8Error) {
+      const errorMessage = fase8Error instanceof Error ? fase8Error.message : String(fase8Error);
+      setError(errorMessage);
+      appendLog('❌ Error en Fase 8: ' + errorMessage);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, excelFile, sourceFolderUrl]);
+
+  const ejecutarCorreccion2460 = React.useCallback(async (): Promise<void> => {
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando corrección puntual para la solicitud 2460: Procedimiento de Registro Manual de Asientos Contables');
+
+    try {
+      const resultado = await ejecutarCorreccionSolicitud2460({
+        context,
+        log: appendLog
+      });
+
+      setCreatedSolicitudIds([]);
+      setOldSolicitudIds([]);
+      setTempFileUrls([]);
+      setFase2RollbackEntries([]);
+      setFase3RollbackEntries([]);
+      setFase4RollbackEntries([]);
+      setFase6RollbackEntries([]);
+      setFase6DiagramRollbackEntries([]);
+      setFase7RollbackEntries([]);
+      setFase8RollbackEntries(resultado.rollbackEntries);
+      setFase9RollbackEntries([]);
+      setLastExecutedPhase('correccion2460');
+
+      appendLog('✅ Corrección 2460 terminada. Procesados=' + resultado.processed);
+      appendLog('✅ OK=' + resultado.ok + ' | ERROR=' + resultado.error);
+      appendLog('🆔 Solicitud origen=' + resultado.solicitudOrigenId + ' | Solicitud nueva=' + resultado.solicitudNuevaId);
+      appendLog('📄 Publicación nueva=' + resultado.rutaNuevoPublicado);
+      appendLog('ℹ️ La corrección 2460 regenera la solicitud vigente usando Relación documentos y Diagramas de Flujo, publica nuevamente en Procesos y reasigna hijos al nuevo padre.');
+      appendLog('ℹ️ El rollback de esta corrección reutiliza la restauración de Fase 8.');
+    } catch (correccionError) {
+      const errorMessage = correccionError instanceof Error ? correccionError.message : String(correccionError);
+      setError(errorMessage);
+      appendLog('❌ Error en corrección 2460: ' + errorMessage);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context]);
+
+  const ejecutarFase9 = React.useCallback(async (): Promise<void> => {
+    if (!excelFile) {
+      setError('Debes seleccionar el Excel revisado antes de ejecutar la Fase 9.');
+      return;
+    }
+
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando Fase 9 para el archivo: ' + excelFile.fileName);
+
+    try {
+      const resultado = await ejecutarFase9BajaDiagramaSolicitud({
+        context,
+        excelFile,
+        log: appendLog
+      });
+
+      setCreatedSolicitudIds([]);
+      setOldSolicitudIds([]);
+      setTempFileUrls([]);
+      setFase2RollbackEntries([]);
+      setFase3RollbackEntries([]);
+      setFase4RollbackEntries([]);
+      setFase6RollbackEntries([]);
+      setFase6DiagramRollbackEntries([]);
+      setFase7RollbackEntries([]);
+      setFase8RollbackEntries([]);
+      setFase9RollbackEntries(resultado.rollbackEntries);
+      setLastExecutedPhase('fase9');
+
+      appendLog('✅ Fase 9 terminada. Procesados=' + resultado.processed);
+      appendLog('✅ OK=' + resultado.ok + ' | SKIP=' + resultado.skipped + ' | ERROR=' + resultado.error);
+      appendLog('📄 Registros rollback Fase 9=' + resultado.rollbackEntries.length);
+      appendLog('📥 Excel final generado: ' + resultado.reportFileName);
+      appendLog('ℹ️ Fase 9 versiona la solicitud padre vigente, excluye el diagrama indicado, regenera el Word y publica nuevamente en Procesos.');
+      appendLog('ℹ️ El rollback de Fase 9 restaura solicitud vigente, relaciones, diagramas y publicación en Procesos.');
+    } catch (fase9Error) {
+      const errorMessage = fase9Error instanceof Error ? fase9Error.message : String(fase9Error);
+      setError(errorMessage);
+      appendLog('❌ Error en Fase 9: ' + errorMessage);
     } finally {
       setIsRunning(false);
     }
@@ -507,12 +917,42 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
         : 'Fase 3 sin cambios exitosos para rollback.';
     }
 
+    if (lastExecutedPhase === 'fase6') {
+      return fase6RollbackEntries.length || fase6DiagramRollbackEntries.length
+        ? `Fase 6 lista para rollback | Documentos ${fase6RollbackEntries.length} | Diagramas ${fase6DiagramRollbackEntries.length}`
+        : 'Fase 6 sin cambios exitosos para rollback.';
+    }
+
+    if (lastExecutedPhase === 'fase7') {
+      return fase7RollbackEntries.length
+        ? `Fase 7 lista para rollback | Diagramas ${fase7RollbackEntries.length}`
+        : 'Fase 7 sin cambios exitosos para rollback.';
+    }
+
+    if (lastExecutedPhase === 'fase8') {
+      return fase8RollbackEntries.length
+        ? `Fase 8 lista para rollback | Registros ${fase8RollbackEntries.length}`
+        : 'Fase 8 sin cambios exitosos para rollback.';
+    }
+
+    if (lastExecutedPhase === 'fase9') {
+      return fase9RollbackEntries.length
+        ? `Fase 9 lista para rollback | Registros ${fase9RollbackEntries.length}`
+        : 'Fase 9 sin cambios exitosos para rollback.';
+    }
+
+    if (lastExecutedPhase === 'correccion2460') {
+      return fase8RollbackEntries.length
+        ? `Corrección 2460 lista para rollback | Registros ${fase8RollbackEntries.length}`
+        : 'Corrección 2460 sin cambios exitosos para rollback.';
+    }
+
     if (!createdSolicitudIds.length && !oldSolicitudIds.length && !tempFileUrls.length) {
       return 'Aun no hay resultados para revertir.';
     }
 
     return `ID modificados ${oldSolicitudIds.length} | ID nuevos ${createdSolicitudIds.length} | TEMP ${tempFileUrls.length}`;
-  }, [createdSolicitudIds.length, fase2RollbackEntries.length, fase3RollbackEntries.length, fase4RollbackEntries.length, lastExecutedPhase, oldSolicitudIds.length, tempFileUrls.length]);
+  }, [createdSolicitudIds.length, fase2RollbackEntries.length, fase3RollbackEntries.length, fase4RollbackEntries.length, fase6DiagramRollbackEntries.length, fase6RollbackEntries.length, fase7RollbackEntries.length, fase8RollbackEntries.length, fase9RollbackEntries.length, lastExecutedPhase, oldSolicitudIds.length, tempFileUrls.length]);
 
   return (
     <section className={`${styles.modificacion} ${hasTeamsContext ? styles.teams : ''} ${isDarkTheme ? styles.dark : ''}`}>
@@ -569,6 +1009,13 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
 
                   <Stack horizontal wrap tokens={{ childrenGap: 12 }}>
                     <DefaultButton text={isRunning ? 'Revisando...' : 'Revisar archivo'} onClick={revisarArchivo} disabled={!excelFile || isRunning} />
+                    {false && (
+                      <DefaultButton
+                        text={isRunning ? 'Buscando duplicados...' : 'Buscar Solicitudes duplicadas'}
+                        onClick={() => { void ejecutarBusquedaSolicitudesDuplicadas(); }}
+                        disabled={isRunning}
+                      />
+                    )}
                   </Stack>
                 </div>
               </div>
@@ -594,7 +1041,7 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
 
               <FolderPicker
                 context={context as any}
-                label="Carpeta de archivos origen"
+                label="Carpeta de archivos origen 2"
                 required={false}
                 canCreateFolders={false}
                 rootFolder={{
@@ -650,6 +1097,32 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                 disabled={!excelFile || isRunning}
               />
 
+
+              <DefaultButton
+                text={isRunning ? 'Procesando Fase 7...' : 'Fase 7: Modificación diagrama de flujo'}
+                onClick={() => { void ejecutarFase7(); }}
+                disabled={!excelFile || !sourceFolderUrl || isRunning}
+              />
+
+              <DefaultButton
+                text={isRunning ? 'Procesando Fase 8...' : 'Fase 8: Alta diagrama nuevo en solicitud'}
+                onClick={() => { void ejecutarFase8(); }}
+                disabled={!excelFile || !sourceFolderUrl || isRunning}
+              />
+              <DefaultButton
+                text={isRunning ? 'Procesando Fase 9...' : 'Fase 9: Baja diagrama de flujo en solicitud'}
+                onClick={() => { void ejecutarFase9(); }}
+                disabled={!excelFile || isRunning}
+              />
+
+              {false && (
+                <DefaultButton
+                  text={isRunning ? 'Corrigiendo 2460...' : 'Corregir ID 2460'}
+                  onClick={() => { void ejecutarCorreccion2460(); }}
+                  disabled={isRunning}
+                />
+              )}
+
               <Text className={styles.rollbackInfo}>
                 {rollbackSummary}
               </Text>
@@ -666,7 +1139,17 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                         ? !fase4RollbackEntries.length
                       : lastExecutedPhase === 'fase3'
                         ? !fase3RollbackEntries.length
-                        : (!createdSolicitudIds.length && !oldSolicitudIds.length && !tempFileUrls.length)
+                        : lastExecutedPhase === 'fase6'
+                          ? (!fase6RollbackEntries.length && !fase6DiagramRollbackEntries.length)
+                          : lastExecutedPhase === 'fase7'
+                            ? !fase7RollbackEntries.length
+                            : lastExecutedPhase === 'fase8'
+                              ? !fase8RollbackEntries.length
+                              : lastExecutedPhase === 'fase9'
+                                ? !fase9RollbackEntries.length
+                                : lastExecutedPhase === 'correccion2460'
+                                  ? !fase8RollbackEntries.length
+                                  : (!createdSolicitudIds.length && !oldSolicitudIds.length && !tempFileUrls.length)
                   )
                 }
               />

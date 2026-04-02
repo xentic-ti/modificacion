@@ -5,18 +5,14 @@
   padding: 24px;
   color: "[theme:bodyText, default: #323130]";
   color: var(--bodyText);
-  background:
-    radial-gradient(circle at top right, rgba(2, 120, 87, 0.16), transparent 28%),
-    linear-gradient(180deg, #f6fbf8 0%, #eef6f1 100%);
+  background: transparent;
 
   &.teams {
     font-family: $ms-font-family-fallbacks;
   }
 
   &.dark {
-    background:
-      radial-gradient(circle at top right, rgba(82, 196, 151, 0.18), transparent 24%),
-      linear-gradient(180deg, #0f1916 0%, #15221e 100%);
+    background: transparent;
   }
 }
 
@@ -25,10 +21,10 @@
   justify-content: space-between;
   align-items: flex-start;
   gap: 20px;
-  padding: 28px;
-  border-radius: 20px;
-  background: linear-gradient(135deg, #0b5c4b 0%, #17795d 100%);
-  color: #ffffff;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
 }
 
 .title {
@@ -40,7 +36,7 @@
 .subtitle {
   display: block;
   max-width: 780px;
-  color: rgba(255, 255, 255, 0.92);
+  color: inherit;
   line-height: 1.5;
 }
 
@@ -48,10 +44,10 @@
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.12);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   white-space: nowrap;
 }
 
@@ -68,10 +64,10 @@
 .mainCard,
 .sideCard,
 .logCard {
-  border-radius: 20px;
-  border: 1px solid rgba(16, 86, 67, 0.12);
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 14px 34px rgba(15, 58, 47, 0.08);
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: transparent;
+  box-shadow: none;
 }
 
 .mainCard,
@@ -96,14 +92,14 @@
 .rollbackInfo {
   display: block;
   line-height: 1.5;
-  color: #4f6b63;
+  color: inherit;
 }
 
 .rollbackInfo {
   padding: 12px 14px;
-  border-radius: 14px;
-  background: #f3f8f5;
-  border: 1px solid #d8e8df;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.08);
   font-weight: 600;
 }
 
@@ -112,9 +108,9 @@
   gap: 18px;
   align-items: center;
   padding: 22px;
-  border: 1px dashed #87b6a4;
-  border-radius: 18px;
-  background: linear-gradient(180deg, rgba(229, 243, 236, 0.9) 0%, rgba(245, 251, 248, 0.95) 100%);
+  border: 1px dashed rgba(0, 0, 0, 0.18);
+  border-radius: 8px;
+  background: transparent;
 }
 
 .uploadIconWrap {
@@ -124,13 +120,13 @@
   min-width: 72px;
   width: 72px;
   height: 72px;
-  border-radius: 18px;
-  background: #d7efe4;
+  border-radius: 8px;
+  background: transparent;
 }
 
 .uploadIcon {
   font-size: 34px;
-  color: #0b6a53;
+  color: inherit;
 }
 
 .uploadContent {
@@ -149,9 +145,9 @@
 
 .statusCard {
   padding: 18px;
-  border-radius: 16px;
-  background: #f3f8f5;
-  border: 1px solid #d8e8df;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 .infoPill {
@@ -161,9 +157,10 @@
   width: fit-content;
   padding: 10px 14px;
   border-radius: 999px;
-  background: #e0f1e8;
-  color: #0b5c4b;
+  background: transparent;
+  color: inherit;
   font-weight: 600;
+  border: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 .logHeader {
@@ -175,9 +172,9 @@
 
 .logField {
   :global(.ms-TextField-fieldGroup) {
-    border-radius: 14px;
-    border: 1px solid #d1e1d8;
-    background: #f8fbf9;
+    border-radius: 8px;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    background: transparent;
   }
 }
 

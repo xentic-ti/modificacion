@@ -1,16 +1,18 @@
 /* eslint-disable */
 // @ts-nocheck
 import * as XLSX from 'xlsx';
-import { IFilePickerResult } from '@pnp/spfx-controls-react/lib/FilePicker';
 import { AadHttpClient } from '@microsoft/sp-http';
+import { IFilePickerResult } from '@pnp/spfx-controls-react/lib/FilePicker';
 import { WebPartContext } from '@microsoft/sp-webpart-base';
 import { fillAndAttachFromServerRelativeUrl } from './documentFillAndAttachFromUrl.service';
+import { listFilesRecursive } from './spFolderExplorer.service';
 import {
+  addAttachment,
   addListItem,
-  deleteListItem,
   ensureFolderPath,
   escapeODataValue,
   getAllItems,
+  deleteListItem,
   getAttachmentFiles,
   recycleFile,
   spGetJson,
@@ -18,11 +20,10 @@ import {
   updateListItem,
   uploadFileToFolder
 } from './sharepointRest.service';
-import { IFase2PublicacionReportRow, descargarReporteFase2Publicacion } from '../utils/fase2PublicacionReportExcel';
-import { IFase6RollbackDiagramEntry, IFase6RollbackEntry, rollbackModificacionFase6 } from './modificacionFase6Rollback.service';
+import { descargarReporteFase2Publicacion, IFase2PublicacionReportRow } from '../utils/fase2PublicacionReportExcel';
+import { IFase8RollbackEntry, rollbackModificacionFase8 } from './modificacionFase8Rollback.service';
 
 type LogFn = (s: string) => void;
-
 type IRelacionadoRow = { solicitudId: number; codigo: string; nombre: string; enlace: string; };
 type IDiagramaRow = { id: number; codigo: string; nombre: string; enlace: string; };
 
@@ -30,13 +31,10 @@ const PROCESOS_ROOT = '/sites/SistemadeGestionDocumental/Procesos';
 const HISTORICOS_ROOT = '/sites/SistemadeGestionDocumental/Documentos Histricos';
 const TEMP_WORD_ROOT = '/sites/SistemadeGestionDocumental/Procesos/TEMP_MIGRACION_WORD';
 
-type IFase6ExcelRow = {
-  solicitudId: number;
+type IFase8ExcelRow = {
+  nombreArchivo: string;
   nombreDocumento: string;
   documentoPadre: string;
-  fechaAprobacion: string;
-  documentosHijosIds: number[];
-  diagramasFlujoIds: number[];
 };
 
 function normalizeHeader(value: any): string {
@@ -46,6 +44,25 @@ function normalizeHeader(value: any): string {
     .replace(/\s+/g, '')
     .trim()
     .toLowerCase();
+}
+
+function normalizeLooseText(value: any): string {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function normalizeLooseFileKey(value: any): string {
+  const raw = String(value ?? '').trim();
+  const extensionMatch = raw.match(/(\.[^.]+)$/);
+  const extension = extensionMatch ? extensionMatch[1].toLowerCase() : '';
+  const baseName = extension ? raw.slice(0, -extension.length) : raw;
+  const normalized = normalizeLooseText(baseName).replace(/ /g, '');
+  return `${normalized}${extension}`;
 }
 
 function trimSlash(value: string): string {
@@ -79,33 +96,12 @@ function buildTodayDdMmYyyy(now: Date): string {
   return `${pad(now.getDate())}/${pad(now.getMonth() + 1)}/${now.getFullYear()}`;
 }
 
-function isEmptyLike(value: any): boolean {
-  const text = String(value ?? '').trim().toLowerCase();
-  return !text || text === '-' || text === '—' || text === 'na' || text === 'n/a' || text === 'null';
-}
-
-function parseSlashIds(value: any): number[] {
-  return String(value || '')
-    .split('/')
-    .map((part) => Number(String(part || '').trim()))
-    .filter((id) => Number.isFinite(id) && id > 0);
-}
-
 function parseDdMmYyyyToDate(value: any): Date | null {
-  if (value === null || value === undefined || value === '') {
-    return null;
-  }
-
-  if (value instanceof Date && !isNaN(value.getTime())) {
-    return value;
-  }
-
+  if (value === null || value === undefined || value === '') return null;
+  if (value instanceof Date && !isNaN(value.getTime())) return value;
   if (typeof value === 'number' && !isNaN(value)) {
     const parsed = XLSX.SSF.parse_date_code(value);
-    if (!parsed) {
-      return null;
-    }
-
+    if (!parsed) return null;
     return new Date(parsed.y, parsed.m - 1, parsed.d, 0, 0, 0);
   }
 
@@ -124,10 +120,7 @@ function parseDdMmYyyyToDate(value: any): Date | null {
 }
 
 function toDateOnlyIso(value: Date | null): string | null {
-  if (!value || isNaN(value.getTime())) {
-    return null;
-  }
-
+  if (!value || isNaN(value.getTime())) return null;
   return new Date(Date.UTC(value.getFullYear(), value.getMonth(), value.getDate(), 0, 0, 0)).toISOString();
 }
 
@@ -173,11 +166,6 @@ function replaceExtension(name: string, extensionWithDot: string): string {
   return `${baseName}${extensionWithDot}`;
 }
 
-function getExt(name: string): string {
-  const match = String(name || '').toLowerCase().trim().match(/(\.[^.]+)$/);
-  return match ? match[1] : '';
-}
-
 function base64UrlEncode(str: string): string {
   const b64 = btoa(unescape(encodeURIComponent(str)));
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
@@ -195,6 +183,11 @@ function obtenerPrimerNombreYApellido(displayName: string): string {
   if (partes.length === 3) return `${partes[0]} ${partes[1]}`;
   if (partes.length >= 2) return `${partes[0]} ${partes[1]}`;
   return partes[0] || '';
+}
+
+function pickBestWordAttachment(files: Array<{ FileName: string; ServerRelativeUrl: string; }>): { FileName: string; ServerRelativeUrl: string; } | null {
+  const candidates = (files || []).filter((file) => /\.docx$/i.test(String(file?.FileName || '')));
+  return candidates.length ? candidates[0] : null;
 }
 
 function buildMoveCopyBody(webUrl: string, srcFileUrl: string, destFileUrl: string, overwrite: boolean): any {
@@ -276,24 +269,18 @@ async function ensureChoiceOptionByListPath(
   valueToEnsure: string
 ): Promise<void> {
   const normalized = String(valueToEnsure || '').trim();
-  if (!normalized) {
-    return;
-  }
+  if (!normalized) return;
 
   const field = await getFieldInfoByListPath(context, webUrl, listPath, fieldInternalName);
   const choices = Array.isArray(field?.Choices) ? field.Choices : [];
   const exists = choices.some((choice: string) => String(choice || '').trim().toLowerCase() === normalized.toLowerCase());
-  if (exists) {
-    return;
-  }
+  if (exists) return;
 
   await spPostJson(
     context,
     webUrl,
     `${webUrl}/_api/web/GetList('${escapeODataValue(listPath)}')/fields/getbyinternalnameortitle('${escapeODataValue(fieldInternalName)}')`,
-    {
-      Choices: [...choices, normalized]
-    },
+    { Choices: [...choices, normalized] },
     'MERGE'
   );
 }
@@ -334,19 +321,6 @@ async function getFieldInternalName(
   return String(field?.InternalName || fieldTitleOrInternalName);
 }
 
-async function tryGetFieldInternalName(
-  context: WebPartContext,
-  webUrl: string,
-  listTitle: string,
-  fieldTitleOrInternalName: string
-): Promise<string | null> {
-  try {
-    return await getFieldInternalName(context, webUrl, listTitle, fieldTitleOrInternalName);
-  } catch (_error) {
-    return null;
-  }
-}
-
 async function resolveFirstExistingFieldInternalName(
   context: WebPartContext,
   webUrl: string,
@@ -354,8 +328,12 @@ async function resolveFirstExistingFieldInternalName(
   candidates: string[]
 ): Promise<string> {
   for (let i = 0; i < candidates.length; i++) {
-    const resolved = await tryGetFieldInternalName(context, webUrl, listTitle, candidates[i]);
-    if (resolved) return resolved;
+    try {
+      const resolved = await getFieldInternalName(context, webUrl, listTitle, candidates[i]);
+      if (resolved) return resolved;
+    } catch (_error) {
+      // continuar
+    }
   }
   throw new Error(`No se encontró el campo esperado en "${listTitle}": ${candidates.join(', ')}`);
 }
@@ -380,9 +358,7 @@ async function getCurrentProcessFileBySolicitudId(
     `${webUrl}/_api/web/GetList('${escapeODataValue(PROCESOS_ROOT)}')/items?$select=Id,FileRef,FileLeafRef,SolicitudId&$filter=SolicitudId eq ${solicitudId}&$top=5`
   );
   const row = (items.value || [])[0];
-  if (!row) {
-    return null;
-  }
+  if (!row) return null;
 
   return {
     Id: Number(row.Id || 0),
@@ -403,15 +379,20 @@ async function getSolicitudById(context: WebPartContext, webUrl: string, solicit
   return spGetJson<any>(context, url);
 }
 
-async function buscarSolicitudPorNombre(context: WebPartContext, webUrl: string, documentName: string): Promise<any | null> {
-  const escaped = String(documentName || '').replace(/'/g, "''");
+async function buscarSolicitudVigentePorNombre(context: WebPartContext, webUrl: string, documentName: string): Promise<any | null> {
+  const escaped = String(documentName || '').replace(/'/g, "''").trim();
   if (!escaped) return null;
 
-  const filter = `(Title eq '${escaped}' or NombreDocumento eq '${escaped}')`;
+  const filter = `(Title eq '${escaped}' or NombreDocumento eq '${escaped}') and EsVersionActualDocumento eq 1`;
   const items = await getAllItems<any>(
     context,
-    `${webUrl}/_api/web/lists/getbytitle('Solicitudes')/items?$select=Id,Title,NombreDocumento,CodigoDocumento&$top=2&$filter=${encodeURIComponent(filter)}`
+    `${webUrl}/_api/web/lists/getbytitle('Solicitudes')/items?$select=Id,Title,NombreDocumento,CodigoDocumento,EsVersionActualDocumento&$top=5&$filter=${encodeURIComponent(filter)}`
   );
+
+  if (items.length > 1) {
+    throw new Error(`Se encontraron múltiples solicitudes vigentes para "${documentName}".`);
+  }
+
   return items.length ? items[0] : null;
 }
 
@@ -429,7 +410,7 @@ async function getSolicitudesRelacionadas(
   webUrl: string,
   ids: number[]
 ): Promise<IRelacionadoRow[]> {
-  const uniqueIds = Array.from(new Set((ids || []).filter((id) => id > 0)));
+  const uniqueIds = Array.from(new Set(ids.filter((id) => id > 0)));
   const rows: IRelacionadoRow[] = [];
   for (let i = 0; i < uniqueIds.length; i++) {
     const id = uniqueIds[i];
@@ -438,8 +419,8 @@ async function getSolicitudesRelacionadas(
         context,
         `${webUrl}/_api/web/lists/getbytitle('Solicitudes')/items(${id})?$select=Id,Title,NombreDocumento,CodigoDocumento`
       );
-      const codigo = item?.CodigoDocumento || '';
-      const nombre = item?.NombreDocumento || item?.Title || '';
+      const codigo = item.CodigoDocumento || '';
+      const nombre = item.NombreDocumento || item.Title || '';
       rows.push({
         solicitudId: id,
         codigo,
@@ -449,7 +430,7 @@ async function getSolicitudesRelacionadas(
           : ''
       });
     } catch (_error) {
-      // ignorar relación rota
+      // omitir hijo inválido
     }
   }
   return rows;
@@ -464,24 +445,12 @@ async function getChildSolicitudIdsByParent(
   const childField = await getFieldInternalName(context, webUrl, 'Relaciones Documentos', 'DocumentoHijo');
   const parentFieldId = `${parentField}Id`;
   const childFieldId = `${childField}Id`;
-
   const items = await getAllItems<any>(
     context,
     `${webUrl}/_api/web/lists/getbytitle('Relaciones Documentos')/items?$select=Id,${parentFieldId},${childFieldId}&$top=5000&$filter=${parentFieldId} eq ${parentSolicitudId}`
   );
 
-  return Array.from(new Set(items.map((item) => Number(item?.[childFieldId] || 0)).filter((id) => id > 0)));
-}
-
-async function getParentRemainingChildrenRows(params: {
-  context: WebPartContext;
-  webUrl: string;
-  parentSolicitudId: number;
-  removedChildSolicitudId: number;
-}): Promise<IRelacionadoRow[]> {
-  const childIds = await getChildSolicitudIdsByParent(params.context, params.webUrl, params.parentSolicitudId);
-  const remainingIds = childIds.filter((id) => id !== params.removedChildSolicitudId);
-  return getSolicitudesRelacionadas(params.context, params.webUrl, remainingIds);
+  return items.map((item) => Number(item[childFieldId] || 0)).filter((id) => id > 0);
 }
 
 async function getDiagramasFlujoRowsBySolicitud(
@@ -510,12 +479,12 @@ async function getDiagramasFlujoRowsBySolicitud(
       id: Number(item.Id || 0),
       codigo: item.Codigo || '',
       nombre: item.Title || '',
+      attachmentName,
       enlace: attachmentName
-        ? `${new URL(webUrl).origin}${rootUrl}/Attachments/${item.Id}/${attachmentName.split('/').map((part: string) => encodeURIComponent(part)).join('/')}`
+        ? `${new URL(webUrl).origin}${rootUrl}/Attachments/${item.Id}/${attachmentName.split('/').map((p: string) => encodeURIComponent(p)).join('/')}`
         : ''
     });
   }
-
   return rows;
 }
 
@@ -527,14 +496,13 @@ async function updateRelacionesDocumentosPadre(
   childIds: number[],
   log: LogFn
 ): Promise<number> {
-  const wanted = new Set((childIds || []).filter((id) => id > 0));
+  const wanted = new Set(childIds.filter((id) => id > 0));
   if (!wanted.size) return 0;
 
   const parentField = await getFieldInternalName(context, webUrl, 'Relaciones Documentos', 'DocumentoPadre');
   const childField = await getFieldInternalName(context, webUrl, 'Relaciones Documentos', 'DocumentoHijo');
   const parentFieldId = `${parentField}Id`;
   const childFieldId = `${childField}Id`;
-
   const items = await getAllItems<any>(
     context,
     `${webUrl}/_api/web/lists/getbytitle('Relaciones Documentos')/items?$select=Id,${parentFieldId},${childFieldId}&$top=5000&$filter=${parentFieldId} eq ${oldParentSolicitudId}`
@@ -543,12 +511,38 @@ async function updateRelacionesDocumentosPadre(
   let updated = 0;
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    if (!wanted.has(Number(item?.[childFieldId] || 0))) continue;
+    if (!wanted.has(Number(item[childFieldId] || 0))) continue;
     await updateListItem(context, webUrl, 'Relaciones Documentos', item.Id, { [parentFieldId]: newParentSolicitudId });
     updated++;
   }
 
-  log(`🔗 Fase 6 | Relaciones actualizadas | PadreAnterior=${oldParentSolicitudId} | PadreNuevo=${newParentSolicitudId} | Registros=${updated}`);
+  log(`🔗 Fase 8 | Relaciones actualizadas | PadreAnterior=${oldParentSolicitudId} | PadreNuevo=${newParentSolicitudId} | Registros=${updated}`);
+  return updated;
+}
+
+async function updateExistingDiagramasSolicitud(
+  context: WebPartContext,
+  webUrl: string,
+  newParentSolicitudId: number,
+  diagramIdsToMove: number[],
+  log: LogFn
+): Promise<number> {
+  const wantedIds = Array.from(new Set((diagramIdsToMove || []).map((id) => Number(id)).filter((id) => id > 0)));
+  if (!wantedIds.length) return 0;
+
+  const solicitudField = await getFieldInternalName(context, webUrl, 'Diagramas de Flujo', 'Solicitud');
+  const solicitudFieldId = `${solicitudField}Id`;
+  const solicitudIsMulti = await getAllowMultipleValues(context, webUrl, 'Diagramas de Flujo', solicitudField);
+
+  let updated = 0;
+  for (let i = 0; i < wantedIds.length; i++) {
+    await updateListItem(context, webUrl, 'Diagramas de Flujo', wantedIds[i], {
+      [solicitudFieldId]: solicitudIsMulti ? [newParentSolicitudId] : newParentSolicitudId
+    });
+    updated++;
+  }
+
+  log(`🧭 Fase 9 | Diagramas vigentes reasignados | SolicitudNueva=${newParentSolicitudId} | Registros=${updated}`);
   return updated;
 }
 
@@ -577,8 +571,7 @@ async function updateChildSolicitudesDocPadres(
 
   let updated = 0;
   for (let i = 0; i < childIds.length; i++) {
-    const childId = childIds[i];
-    const item = itemById.get(childId);
+    const item = itemById.get(childIds[i]);
     if (!item) continue;
 
     const currentIds = normalizeLookupIds(item[docPadresFieldId]);
@@ -596,13 +589,13 @@ async function updateChildSolicitudesDocPadres(
     if (!changed) continue;
 
     const deduped = Array.from(new Set(nextIds.filter((id) => id > 0)));
-    await updateListItem(context, webUrl, 'Solicitudes', childId, {
+    await updateListItem(context, webUrl, 'Solicitudes', childIds[i], {
       [docPadresFieldId]: docPadresIsMulti ? deduped : (deduped[0] || null)
     });
     updated++;
   }
 
-  log(`👨‍👧 Fase 6 | DocPadres actualizados | PadreAnterior=${oldParentSolicitudId} | PadreNuevo=${newParentSolicitudId} | Solicitudes=${updated}`);
+  log(`👨‍👧 Fase 8 | DocPadres actualizados | PadreAnterior=${oldParentSolicitudId} | PadreNuevo=${newParentSolicitudId} | Solicitudes=${updated}`);
   return updated;
 }
 
@@ -624,11 +617,8 @@ async function updateChildProcessParentReferences(params: {
     const childFile = await getCurrentProcessFileBySolicitudId(params.context, params.webUrl, childIds[i]);
     if (!childFile?.FileRef) continue;
 
-    const metadata = await spGetJson<any>(
-      params.context,
-      `${params.webUrl}/_api/web/GetFileByServerRelativePath(decodedurl='${escapeODataValue(childFile.FileRef)}')/ListItemAllFields?$select=DocumentoPadreId`
-    );
-    const currentIds = normalizeLookupIds(metadata?.DocumentoPadreId);
+    const childMetadata = await getFileItemMetadata(params.context, params.webUrl, childFile.FileRef);
+    const currentIds = normalizeLookupIds(childMetadata?.DocumentoPadreId);
     if (!currentIds.length) continue;
 
     let changed = false;
@@ -639,7 +629,6 @@ async function updateChildProcessParentReferences(params: {
       }
       return id;
     });
-
     if (!changed) continue;
 
     const deduped = Array.from(new Set(nextIds.filter((id) => id > 0)));
@@ -649,26 +638,22 @@ async function updateChildProcessParentReferences(params: {
     updated++;
   }
 
-  params.log(`👨‍👧 Fase 6 | Referencias en Procesos actualizadas | PadreArchivoAnterior=${params.oldParentProcessItemId} | PadreArchivoNuevo=${params.newParentProcessItemId} | Archivos=${updated}`);
+  params.log(`👨‍👧 Fase 8 | Referencias en Procesos actualizadas | PadreArchivoAnterior=${params.oldParentProcessItemId} | PadreArchivoNuevo=${params.newParentProcessItemId} | Archivos=${updated}`);
   return updated;
 }
 
-function pickBestWordAttachment(files: Array<{ FileName: string; ServerRelativeUrl: string; }>): { FileName: string; ServerRelativeUrl: string; } | null {
-  const candidates = (files || []).filter((file) => /\.docx$/i.test(String(file?.FileName || '')));
-  return candidates.length ? candidates[0] : null;
-}
-
-function buildNewParentSolicitudPayload(oldSolicitud: any, versionDocumento: string, fechaAprobacionExcel: string): any {
+function buildNewSolicitudPayload(oldSolicitud: any, versionDocumento: string): any {
   const impactAreaIds = Array.isArray(oldSolicitud?.AreasImpactadas)
     ? oldSolicitud.AreasImpactadas.map((item: any) => Number(item?.Id || 0)).filter((id: number) => id > 0)
     : [];
+
   const payload: any = {
     Title: oldSolicitud?.NombreDocumento || oldSolicitud?.Title || '',
     Accion: 'Actualización de documento',
     NombreDocumento: oldSolicitud?.NombreDocumento || oldSolicitud?.Title || '',
     CategoriadeDocumento: oldSolicitud?.CategoriadeDocumento || '',
     ResumenDocumento: oldSolicitud?.ResumenDocumento || '',
-    FechaDeAprobacionSolicitud: toDateOnlyIso(parseDdMmYyyyToDate(fechaAprobacionExcel)) || oldSolicitud?.FechaDeAprobacionSolicitud || new Date().toISOString(),
+    FechaDeAprobacionSolicitud: oldSolicitud?.FechaDeAprobacionSolicitud || new Date().toISOString(),
     FechadeVigencia: oldSolicitud?.FechadeVigencia || null,
     FechaDePublicacionSolicitud: new Date().toISOString(),
     FechadeEnvio: new Date().toISOString(),
@@ -711,14 +696,8 @@ async function convertOfficeFileToPdfAndUpload(params: {
     if (response.ok) {
       const pdfBuffer = await response.arrayBuffer();
       const pdfBlob = new Blob([pdfBuffer], { type: 'application/pdf' });
-      await uploadFileToFolder(
-        params.context,
-        params.webUrl,
-        params.destinoFolderServerRelativeUrl,
-        params.outputPdfName,
-        pdfBlob
-      );
-      params.log?.(`📄✅ Padre publicado en PDF | ${params.outputPdfName}`);
+      await uploadFileToFolder(params.context, params.webUrl, params.destinoFolderServerRelativeUrl, params.outputPdfName, pdfBlob);
+      params.log?.(`📄✅ Fase 8 | Documento publicado en PDF | ${params.outputPdfName}`);
       return;
     }
 
@@ -731,7 +710,7 @@ async function convertOfficeFileToPdfAndUpload(params: {
       normalized.indexOf('temporarily unavailable') !== -1;
 
     if (retryable && attempt < maxRetries) {
-      params.log?.(`⚠️ Reintentando conversión PDF padre (${attempt}/${maxRetries}) | ${params.outputPdfName} | HTTP ${response.status}`);
+      params.log?.(`⚠️ Fase 8 | Reintentando conversión PDF (${attempt}/${maxRetries}) | ${params.outputPdfName} | HTTP ${response.status}`);
       await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
       continue;
     }
@@ -749,19 +728,14 @@ async function publishParentFile(params: {
   log?: LogFn;
 }): Promise<string> {
   const destinationFileUrl = `${trimSlash(params.targetFolderUrl)}/${params.outputFileName}`;
-  if (/\.docx$/i.test(params.sourceFileUrl)) {
-    await convertOfficeFileToPdfAndUpload({
-      context: params.context,
-      webUrl: params.webUrl,
-      sourceServerRelativeUrl: params.sourceFileUrl,
-      destinoFolderServerRelativeUrl: params.targetFolderUrl,
-      outputPdfName: params.outputFileName,
-      log: params.log
-    });
-  } else {
-    await copyFileByPath(params.context, params.webUrl, params.sourceFileUrl, destinationFileUrl, false);
-    params.log?.(`📄✅ Padre publicado sin conversión | ${params.outputFileName}`);
-  }
+  await convertOfficeFileToPdfAndUpload({
+    context: params.context,
+    webUrl: params.webUrl,
+    sourceServerRelativeUrl: params.sourceFileUrl,
+    destinoFolderServerRelativeUrl: params.targetFolderUrl,
+    outputPdfName: params.outputFileName,
+    log: params.log
+  });
   return destinationFileUrl;
 }
 
@@ -770,9 +744,8 @@ async function updateHistoricoMetadata(params: {
   webUrl: string;
   historicoFileUrl: string;
   oldMetadata: any;
-  fechaAprobacionExcel: string;
+  fechaAprobacion: any;
   today: Date;
-  accion: string;
 }): Promise<void> {
   const hisAreaImpactada = parseAreaImpactada(params.oldMetadata?.AreaImpactada).join(' / ');
   if (hisAreaImpactada) {
@@ -794,22 +767,21 @@ async function updateHistoricoMetadata(params: {
     HisFechaDeBaja: toDateOnlyIso(params.today),
     HisCategoriaDocumento: params.oldMetadata?.CategoriaDocumento || '',
     InstanciaDeAprobacionId: Number(params.oldMetadata?.InstanciaDeAprobacionId || 0) || null,
-    Accion: params.accion,
-    HisFechaAprobacionBaja: toDateOnlyIso(parseDdMmYyyyToDate(params.fechaAprobacionExcel))
+    Accion: 'Actualización de documento',
+    HisFechaAprobacionBaja: toDateOnlyIso(parseDdMmYyyyToDate(params.fechaAprobacion) || new Date(params.fechaAprobacion))
   };
 
   await updateFileMetadataByPath(params.context, params.webUrl, params.historicoFileUrl, payload);
 }
 
-async function moverDocumentoAHistoricoPorSolicitud(params: {
+async function stageDocumentoAHistorico(params: {
   context: WebPartContext;
   webUrl: string;
   solicitudId: number;
-  fechaAprobacionExcel: string;
+  fechaAprobacion: any;
   now: Date;
   todayStamp: string;
   log: LogFn;
-  accionHistorico: string;
 }): Promise<{
   rutaProcesoOriginal: string;
   rutaProcesoRenombrada: string;
@@ -820,7 +792,6 @@ async function moverDocumentoAHistoricoPorSolicitud(params: {
   nombreDocumento: string;
   processItemId: number;
   oldMetadata: any;
-  rollbackEntry: IFase6RollbackEntry;
 }> {
   const currentFile = await getCurrentProcessFileBySolicitudId(params.context, params.webUrl, params.solicitudId);
   if (!currentFile?.FileRef) {
@@ -838,27 +809,20 @@ async function moverDocumentoAHistoricoPorSolicitud(params: {
   const oldRenamedUrl = `${procesosFolder}/${renamedFileName}`;
   const historicoUrl = `${historicosFolder}/${renamedFileName}`;
 
-  params.log(`📁 Fase 6 | Documento original: ${oldOriginalUrl}`);
-  params.log(`✏️ Fase 6 | Documento renombrado: ${oldRenamedUrl}`);
-  params.log(`📚 Fase 6 | Histórico destino: ${historicoUrl}`);
+  params.log(`📁 Fase 8 | Documento original: ${oldOriginalUrl}`);
+  params.log(`✏️ Fase 8 | Documento renombrado temporal: ${oldRenamedUrl}`);
+  params.log(`📚 Fase 8 | Histórico destino: ${historicoUrl}`);
 
-  await moveFileByPath(params.context, params.webUrl, oldOriginalUrl, oldRenamedUrl, false);
+  await moveFileByPath(params.context, params.webUrl, oldOriginalUrl, oldRenamedUrl, true);
   await ensureFolderPath(params.context, params.webUrl, historicosFolder);
-  await copyFileByPath(params.context, params.webUrl, oldRenamedUrl, historicoUrl, false);
-
+  await copyFileByPath(params.context, params.webUrl, oldRenamedUrl, historicoUrl, true);
   await updateHistoricoMetadata({
     context: params.context,
     webUrl: params.webUrl,
     historicoFileUrl: historicoUrl,
     oldMetadata,
-    fechaAprobacionExcel: params.fechaAprobacionExcel,
-    today: params.now,
-    accion: params.accionHistorico
-  });
-
-  await recycleFile(params.context, params.webUrl, oldRenamedUrl);
-  await updateListItem(params.context, params.webUrl, 'Solicitudes', params.solicitudId, {
-    EsVersionActualDocumento: false
+    fechaAprobacion: params.fechaAprobacion,
+    today: params.now
   });
 
   return {
@@ -870,15 +834,7 @@ async function moverDocumentoAHistoricoPorSolicitud(params: {
     codigoDocumento: oldMetadata?.Codigodedocumento || '',
     nombreDocumento: oldMetadata?.NombreDocumento || oldMetadata?.Title || '',
     processItemId: currentFile.Id,
-    oldMetadata,
-    rollbackEntry: {
-      solicitudId: params.solicitudId,
-      nombreDocumento: oldMetadata?.NombreDocumento || oldMetadata?.Title || '',
-      oldOriginalUrl,
-      oldRenamedUrl,
-      historicoUrl,
-      oldOriginalMetadata: oldMetadata
-    }
+    oldMetadata
   };
 }
 
@@ -890,9 +846,8 @@ async function updateParentProcesosMetadataAfterPublish(params: {
   parentSolicitud: any;
   newSolicitudId: number;
   newVersion: string;
-  fechaAprobacionExcel: string;
 }): Promise<void> {
-  const fechaAprobacion = toDateOnlyIso(parseDdMmYyyyToDate(params.fechaAprobacionExcel)) || params.oldMetadata?.FechaDeAprobacion || null;
+  const fechaAprobacion = params.parentSolicitud?.FechaDeAprobacionSolicitud || params.oldMetadata?.FechaDeAprobacion || null;
   const fechaVigencia = params.parentSolicitud?.FechadeVigencia || params.oldMetadata?.FechaDeVigencia || null;
   const areaImpactada = parseAreaImpactada(params.oldMetadata?.AreaImpactada);
   const areaImpactadaIsMulti = await getAllowMultipleValuesByListPath(params.context, params.webUrl, PROCESOS_ROOT, 'AreaImpactada');
@@ -921,177 +876,34 @@ async function updateParentProcesosMetadataAfterPublish(params: {
   await updateFileMetadataByPath(params.context, params.webUrl, params.targetFileUrl, payload);
 }
 
-async function regenerateParentAfterChildBaja(params: {
-  context: WebPartContext;
-  webUrl: string;
-  parentSolicitudId: number;
-  removedChildSolicitudId: number;
-  fechaAprobacionExcel: string;
-  now: Date;
-  todayStamp: string;
-  rowRollbackEntries: IFase6RollbackEntry[];
-  log: LogFn;
-}): Promise<{ newParentSolicitudId: number; publishedUrl: string; remainingChildIds: number[]; }> {
-  const parentSolicitud = await getSolicitudById(params.context, params.webUrl, params.parentSolicitudId);
-  const currentParentFile = await getCurrentProcessFileBySolicitudId(params.context, params.webUrl, params.parentSolicitudId);
-  if (!currentParentFile?.FileRef) {
-    throw new Error(`No se encontró el archivo vigente del padre ${params.parentSolicitudId}.`);
+async function readArrayBufferFromFilePicker(file: IFilePickerResult): Promise<ArrayBuffer> {
+  if (!file) throw new Error('Archivo Excel no recibido.');
+
+  if (typeof file.downloadFileContent === 'function') {
+    const blob = await file.downloadFileContent();
+    return blob.arrayBuffer();
   }
 
-  const parentAttachments = await getAttachmentFiles(params.context, params.webUrl, 'Solicitudes', params.parentSolicitudId);
-  const sourceWord = pickBestWordAttachment(parentAttachments as any);
-  if (!sourceWord?.ServerRelativeUrl) {
-    throw new Error(`No se encontró un Word adjunto en la solicitud padre ${params.parentSolicitudId} para regenerarlo.`);
+  const url = (file as any).fileAbsoluteUrl || '';
+  if (!url) throw new Error('No se pudo obtener el contenido del Excel de Fase 8.');
+
+  const response = await fetch(url, { credentials: 'same-origin' });
+  if (!response.ok) {
+    throw new Error(`No se pudo descargar el Excel de Fase 8. HTTP ${response.status}`);
   }
 
-  const remainingChildren = await getParentRemainingChildrenRows({
-    context: params.context,
-    webUrl: params.webUrl,
-    parentSolicitudId: params.parentSolicitudId,
-    removedChildSolicitudId: params.removedChildSolicitudId
-  });
-  const diagramas = await getDiagramasFlujoRowsBySolicitud(params.context, params.webUrl, params.parentSolicitudId);
-  const duenioDocumento = await getAreaGerenteNombre(params.context, params.webUrl, Number(parentSolicitud?.AreaDuenaId || 0));
-  const impactAreaIds = Array.isArray(parentSolicitud?.AreasImpactadas)
-    ? parentSolicitud.AreasImpactadas.map((item: any) => Number(item?.Id || 0)).filter((id: number) => id > 0)
-    : [];
-  const versionNueva = incrementVersion(parentSolicitud?.VersionDocumento || '1.0');
-  const newParentSolicitudId = await addListItem(
-    params.context,
-    params.webUrl,
-    'Solicitudes',
-    buildNewParentSolicitudPayload(parentSolicitud, versionNueva, params.fechaAprobacionExcel)
-  );
-
-  const rollbackEntry: IFase6RollbackEntry = {
-    solicitudId: params.parentSolicitudId,
-    nombreDocumento: parentSolicitud?.NombreDocumento || parentSolicitud?.Title || '',
-    oldOriginalUrl: currentParentFile.FileRef,
-    oldRenamedUrl: '',
-    historicoUrl: '',
-    oldOriginalMetadata: undefined,
-    sourceType: 'parent_regenerated',
-    replacementSolicitudId: newParentSolicitudId,
-    updatedChildSolicitudIds: remainingChildren.map((item) => item.solicitudId).filter((id) => id > 0)
-  };
-  params.rowRollbackEntries.push(rollbackEntry);
-
-  const tempDestino = joinFolder(TEMP_WORD_ROOT, getRelativeFolderWithinProcesos(currentParentFile.FileRef));
-  params.log(`📂 Fase 6 | TEMP destino padre ${params.parentSolicitudId}: ${tempDestino}`);
-
-  const attachResult = await fillAndAttachFromServerRelativeUrl({
-    context: params.context,
-    webUrl: params.webUrl,
-    listTitle: 'Solicitudes',
-    itemId: newParentSolicitudId,
-    originalFileName: sourceWord.FileName,
-    sourceFileServerRelativeUrl: sourceWord.ServerRelativeUrl,
-    titulo: parentSolicitud?.NombreDocumento || parentSolicitud?.Title || '',
-    instanciaRaw: parentSolicitud?.Instanciasdeaprobacion?.Title || 'Gerencia de Área',
-    impactAreaIds,
-    dueno: duenioDocumento,
-    fechaVigencia: parentSolicitud?.FechadeVigencia || '',
-    fechaAprobacion: params.fechaAprobacionExcel || parentSolicitud?.FechaDeAprobacionSolicitud || '',
-    resumen: parentSolicitud?.ResumenDocumento || '',
-    version: versionNueva,
-    codigoDocumento: parentSolicitud?.CodigoDocumento || '',
-    relacionados: remainingChildren.map((item) => ({ codigo: item.codigo, nombre: item.nombre, enlace: item.enlace })),
-    diagramasFlujo: diagramas.map((item) => ({ codigo: item.codigo, nombre: item.nombre, enlace: item.enlace })),
-    tempDestinoFolderServerRelativeUrl: tempDestino,
-    replaceIfExists: true,
-    log: params.log
-  });
-
-  if (!attachResult.ok || !attachResult.tempFileServerRelativeUrl) {
-    throw new Error(attachResult.error || `No se pudo regenerar el adjunto del padre ${params.parentSolicitudId}.`);
-  }
-  rollbackEntry.tempFileUrl = attachResult.tempFileServerRelativeUrl;
-
-  const movedParent = await moverDocumentoAHistoricoPorSolicitud({
-    context: params.context,
-    webUrl: params.webUrl,
-    solicitudId: params.parentSolicitudId,
-    fechaAprobacionExcel: params.fechaAprobacionExcel,
-    now: params.now,
-    todayStamp: params.todayStamp,
-    log: params.log,
-    accionHistorico: 'Actualización de documento'
-  });
-
-  rollbackEntry.oldOriginalUrl = movedParent.rutaProcesoOriginal;
-  rollbackEntry.oldRenamedUrl = movedParent.rutaProcesoRenombrada;
-  rollbackEntry.historicoUrl = movedParent.rutaHistorico;
-  rollbackEntry.oldOriginalMetadata = movedParent.oldMetadata;
-
-  const procesosFolder = joinFolder(PROCESOS_ROOT, getRelativeFolderWithinProcesos(movedParent.rutaProcesoOriginal));
-  const outputFileName = /\.docx$/i.test(attachResult.attachmentFileName || '')
-    ? replaceExtension(currentParentFile.FileLeafRef, '.pdf')
-    : currentParentFile.FileLeafRef;
-
-  const publishedUrl = await publishParentFile({
-    context: params.context,
-    webUrl: params.webUrl,
-    sourceFileUrl: attachResult.tempFileServerRelativeUrl,
-    targetFolderUrl: procesosFolder,
-    outputFileName,
-    log: params.log
-  });
-  rollbackEntry.replacementPublishedUrl = publishedUrl;
-
-  await updateParentProcesosMetadataAfterPublish({
-    context: params.context,
-    webUrl: params.webUrl,
-    targetFileUrl: publishedUrl,
-    oldMetadata: movedParent.oldMetadata,
-    parentSolicitud,
-    newSolicitudId: newParentSolicitudId,
-    newVersion: versionNueva,
-    fechaAprobacionExcel: params.fechaAprobacionExcel
-  });
-
-  const newParentProcess = await getCurrentProcessFileBySolicitudId(params.context, params.webUrl, newParentSolicitudId);
-  rollbackEntry.replacementProcessItemId = Number(newParentProcess?.Id || 0) || undefined;
-
-  const remainingChildIds = remainingChildren.map((item) => item.solicitudId).filter((id) => id > 0);
-  if (remainingChildIds.length) {
-    await updateRelacionesDocumentosPadre(params.context, params.webUrl, params.parentSolicitudId, newParentSolicitudId, remainingChildIds, params.log);
-    await updateChildSolicitudesDocPadres(params.context, params.webUrl, remainingChildIds, params.parentSolicitudId, newParentSolicitudId, params.log);
-    if (movedParent.processItemId && rollbackEntry.replacementProcessItemId) {
-      await updateChildProcessParentReferences({
-        context: params.context,
-        webUrl: params.webUrl,
-        childSolicitudIds: remainingChildIds,
-        oldParentProcessItemId: movedParent.processItemId,
-        newParentProcessItemId: rollbackEntry.replacementProcessItemId,
-        log: params.log
-      });
-    }
-  }
-
-  params.log(`👪 Fase 6 | Padre regenerado ${params.parentSolicitudId} -> ${newParentSolicitudId}`);
-  return {
-    newParentSolicitudId,
-    publishedUrl,
-    remainingChildIds
-  };
+  return response.arrayBuffer();
 }
 
-async function readFase6Excel(file: IFilePickerResult): Promise<IFase6ExcelRow[]> {
-  const buffer = typeof file.downloadFileContent === 'function'
-    ? await (await file.downloadFileContent()).arrayBuffer()
-    : await (await fetch((file as any).fileAbsoluteUrl || '', { credentials: 'same-origin' })).arrayBuffer();
-
+async function readFase9Excel(file: IFilePickerResult): Promise<IFase8ExcelRow[]> {
+  const buffer = await readArrayBufferFromFilePicker(file);
   const workbook = XLSX.read(buffer, { type: 'array', cellDates: false });
   const sheetName = workbook.SheetNames[0];
-  if (!sheetName) {
-    throw new Error('No se encontró la hoja del Excel de revisión.');
-  }
+  if (!sheetName) throw new Error('No se encontró la hoja del Excel de Fase 9.');
 
   const worksheet = workbook.Sheets[sheetName];
   const aoa = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '', raw: false }) as any[][];
-  if (!aoa.length) {
-    return [];
-  }
+  if (!aoa.length) return [];
 
   const headers = aoa[0] || [];
   const headerMap = new Map<string, number>();
@@ -1102,60 +914,50 @@ async function readFase6Excel(file: IFilePickerResult): Promise<IFase6ExcelRow[]
   const findIndex = (aliases: string[]): number => {
     for (let i = 0; i < aliases.length; i++) {
       const index = headerMap.get(normalizeHeader(aliases[i]));
-      if (index !== undefined) {
-        return index;
-      }
+      if (index !== undefined) return index;
     }
-
     return -1;
   };
 
-  const idxSolicitud = findIndex(['ID Solicitud', 'SolicitudID', 'Solicitud Id']);
-  const idxNombre = findIndex(['Nombre Documento', 'NombreDocumento']);
+  const idxDocumento = findIndex(['Nombre del Documento', 'NombreDocumento', 'Documento']);
   const idxPadre = findIndex(['Documento Padre', 'DocumentoPadre', 'Padre']);
-  const idxFechaAprobacion = findIndex(['Fecha Aprobación', 'FechaDeAprobacion', 'Fecha de Aprobacion', 'Fecha Aprobacion']);
-  const idxHijos = findIndex(['Documentos hijos', 'DocumentosHijosIDs', 'DocumentosHijos']);
-  const idxFlujos = findIndex(['Diagrama de Flujos', 'Diagramas de Flujo', 'DiagramasFlujo']);
 
-  if (idxSolicitud === -1) {
-    throw new Error('El Excel no contiene la columna "ID Solicitud".');
+  if (idxDocumento === -1 || idxPadre === -1) {
+    throw new Error('El Excel de Fase 9 debe contener las columnas "Nombre del Documento" y "Documento Padre".');
   }
 
-  const rows: IFase6ExcelRow[] = [];
+  const rows: IFase8ExcelRow[] = [];
   for (let i = 1; i < aoa.length; i++) {
     const row = aoa[i] || [];
-    const solicitudId = Number(row[idxSolicitud] || 0);
-    const nombreDocumento = idxNombre === -1 ? '' : String(row[idxNombre] || '').trim();
-    const documentoPadre = idxPadre === -1 ? '' : String(row[idxPadre] || '').trim();
-    const fechaAprobacion = idxFechaAprobacion === -1 ? '' : String(row[idxFechaAprobacion] || '').trim();
-    const documentosHijosIds = idxHijos === -1 ? [] : parseSlashIds(row[idxHijos]);
-    const diagramasFlujoIds = idxFlujos === -1 ? [] : parseSlashIds(row[idxFlujos]);
+    const nombreDocumento = String(row[idxDocumento] || '').trim();
+    const documentoPadre = String(row[idxPadre] || '').trim();
 
-    if (!solicitudId && !nombreDocumento) {
-      continue;
-    }
-
-    rows.push({
-      solicitudId,
-      nombreDocumento,
-      documentoPadre,
-      fechaAprobacion,
-      documentosHijosIds,
-      diagramasFlujoIds
-    });
+    if (!nombreDocumento && !documentoPadre) continue;
+    rows.push({ nombreArchivo: '', nombreDocumento, documentoPadre });
   }
 
   return rows;
 }
 
-export async function ejecutarFase6BajaDocumentos(params: {
+function findDiagramToRemove(row: IFase8ExcelRow, diagramas: IDiagramaRow[]): IDiagramaRow | null {
+  const documentoNormalizado = normalizeLooseText(row.nombreDocumento || '');
+
+  const byName = diagramas.filter((item) => normalizeLooseText(item.nombre) === documentoNormalizado);
+  if (byName.length === 1) return byName[0];
+  if (byName.length > 1) {
+    throw new Error(`Se encontraron múltiples diagramas con el nombre "${row.nombreDocumento}" para "${row.documentoPadre}".`);
+  }
+
+  return null;
+}
+
+export async function ejecutarFase9BajaDiagramaSolicitud(params: {
   context: WebPartContext;
   excelFile: IFilePickerResult;
   log?: LogFn;
 }): Promise<{
   reportRows: IFase2PublicacionReportRow[];
-  rollbackEntries: IFase6RollbackEntry[];
-  diagramRollbackEntries: IFase6RollbackDiagramEntry[];
+  rollbackEntries: IFase8RollbackEntry[];
   reportFileName: string;
   processed: number;
   ok: number;
@@ -1164,15 +966,13 @@ export async function ejecutarFase6BajaDocumentos(params: {
 }> {
   const log = params.log || (() => undefined);
   const webUrl = params.context.pageContext.web.absoluteUrl;
-  const rows = await readFase6Excel(params.excelFile);
+  const rows = await readFase9Excel(params.excelFile);
+
   const reportRows: IFase2PublicacionReportRow[] = [];
-  const rollbackEntries: IFase6RollbackEntry[] = [];
-  const diagramRollbackEntries: IFase6RollbackDiagramEntry[] = [];
+  const rollbackEntries: IFase8RollbackEntry[] = [];
   const now = new Date();
   const todayStamp = buildTodayStamp(now);
   const todayText = buildTodayDdMmYyyy(now);
-  const processedSolicitudes = new Set<number>();
-  const processedChildren = new Set<number>();
 
   let ok = 0;
   let skipped = 0;
@@ -1180,15 +980,18 @@ export async function ejecutarFase6BajaDocumentos(params: {
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
+    const rowRollbackEntries: IFase8RollbackEntry[] = [];
+    let newSolicitudId: number | '' = '';
+    let publishedUrl = '';
 
-    if (!row.solicitudId) {
+    if (!row.documentoPadre || !row.nombreDocumento) {
       skipped++;
       reportRows.push({
         EstadoFase2: 'SKIP',
         SolicitudOrigenID: '',
         SolicitudID: '',
-        NombreDocumento: row.nombreDocumento || '',
-        NombreArchivo: '',
+        NombreDocumento: row.documentoPadre || '',
+        NombreArchivo: row.nombreArchivo || '',
         CodigoDocumento: '',
         ArchivoProcesoOriginal: '',
         RutaProcesoOriginal: '',
@@ -1199,169 +1002,238 @@ export async function ejecutarFase6BajaDocumentos(params: {
         VersionDocumentoAnterior: '',
         VersionDocumentoNueva: '',
         FechaBajaHistorico: todayText,
-        FechaAprobacionBaja: row.fechaAprobacion || '',
-        Error: 'Fila omitida por no tener ID Solicitud.'
+        FechaAprobacionBaja: '',
+        Error: 'Fila incompleta. Se requieren Nombre del Documento y Documento Padre.'
       });
       continue;
     }
-
-    if (processedSolicitudes.has(row.solicitudId)) {
-      skipped++;
-      log(`ℹ️ Fase 6 | Solicitud repetida omitida: ${row.solicitudId}`);
-      continue;
-    }
-
-    const rowRollbackEntries: IFase6RollbackEntry[] = [];
-    let rowDiagramRollbackEntries: IFase6RollbackDiagramEntry[] = [];
-    let parentPublishedUrl = '';
-    let parentNewSolicitudId: number | '' = '';
 
     try {
-      const childSolicitud = await getSolicitudById(params.context, webUrl, row.solicitudId);
-      const parentNameFromExcel = isEmptyLike(row.documentoPadre) ? '' : String(row.documentoPadre || '').trim();
-      const parentSolicitud = parentNameFromExcel
-        ? await buscarSolicitudPorNombre(params.context, webUrl, parentNameFromExcel)
-        : null;
-      const parentSolicitudId = Number(parentSolicitud?.Id || 0);
-      if (parentNameFromExcel && !parentSolicitudId) {
-        throw new Error(`No se encontró la solicitud del padre "${parentNameFromExcel}" para la solicitud ${row.solicitudId}.`);
+      const parentSolicitudRef = await buscarSolicitudVigentePorNombre(params.context, webUrl, row.documentoPadre);
+      if (!parentSolicitudRef?.Id) {
+        throw new Error(`No se encontró una solicitud vigente para el Documento Padre "${row.documentoPadre}".`);
       }
 
-      const principal = await moverDocumentoAHistoricoPorSolicitud({
+      const parentSolicitudId = Number(parentSolicitudRef.Id || 0);
+      const parentSolicitud = await getSolicitudById(params.context, webUrl, parentSolicitudId);
+      const currentParentFile = await getCurrentProcessFileBySolicitudId(params.context, webUrl, parentSolicitudId);
+      if (!currentParentFile?.FileRef) {
+        throw new Error(`No se encontró el archivo vigente del padre ${parentSolicitudId}.`);
+      }
+
+      const parentAttachments = await getAttachmentFiles(params.context, webUrl, 'Solicitudes', parentSolicitudId);
+      const sourceWord = pickBestWordAttachment(parentAttachments as any);
+      if (!sourceWord?.ServerRelativeUrl) {
+        throw new Error(`No se encontró un Word adjunto en la solicitud ${parentSolicitudId} para regenerarlo.`);
+      }
+
+      const childIds = await getChildSolicitudIdsByParent(params.context, webUrl, parentSolicitudId);
+      const relacionados = await getSolicitudesRelacionadas(params.context, webUrl, childIds);
+      const existingDiagramas = await getDiagramasFlujoRowsBySolicitud(params.context, webUrl, parentSolicitudId);
+      const diagramToRemove = findDiagramToRemove(row, existingDiagramas);
+      const diagramasMantener = diagramToRemove ? existingDiagramas.filter((item) => item.id !== diagramToRemove.id) : existingDiagramas;
+      const versionNueva = incrementVersion(parentSolicitud?.VersionDocumento || '1.0');
+      const duenoDocumento = await getAreaGerenteNombre(params.context, webUrl, Number(parentSolicitud?.AreaDuenaId || 0));
+      const impactAreaIds = Array.isArray(parentSolicitud?.AreasImpactadas)
+        ? parentSolicitud.AreasImpactadas.map((item: any) => Number(item?.Id || 0)).filter((id: number) => id > 0)
+        : [];
+
+      newSolicitudId = await addListItem(
+        params.context,
+        webUrl,
+        'Solicitudes',
+        buildNewSolicitudPayload(parentSolicitud, versionNueva)
+      );
+
+      const rollbackEntry: IFase8RollbackEntry = {
+        solicitudId: parentSolicitudId,
+        nombreDocumento: parentSolicitud?.NombreDocumento || parentSolicitud?.Title || row.documentoPadre || '',
+        oldOriginalUrl: currentParentFile.FileRef,
+        oldRenamedUrl: '',
+        historicoUrl: '',
+        oldOriginalMetadata: undefined,
+        replacementSolicitudId: Number(newSolicitudId),
+        updatedChildSolicitudIds: childIds.slice(),
+        reassignedExistingDiagramIds: diagramasMantener.map((item) => item.id).filter((id) => id > 0)
+      };
+      rowRollbackEntries.push(rollbackEntry);
+
+      if (!diagramToRemove) {
+        log(`ℹ️ Fase 9 | El diagrama "${row.nombreDocumento}" ya no existe en la lista Diagramas de Flujo para el padre "${row.documentoPadre}". Se continúa con la generación del documento.`);
+      }
+      const tempDestino = joinFolder(TEMP_WORD_ROOT, getRelativeFolderWithinProcesos(currentParentFile.FileRef));
+      log(`📂 Fase 9 | TEMP destino padre ${parentSolicitudId}: ${tempDestino}`);
+
+      const attachResult = await fillAndAttachFromServerRelativeUrl({
         context: params.context,
         webUrl,
-        solicitudId: row.solicitudId,
-        fechaAprobacionExcel: row.fechaAprobacion,
+        listTitle: 'Solicitudes',
+        itemId: Number(newSolicitudId),
+        originalFileName: sourceWord.FileName,
+        sourceFileServerRelativeUrl: sourceWord.ServerRelativeUrl,
+        titulo: parentSolicitud?.NombreDocumento || parentSolicitud?.Title || '',
+        instanciaRaw: parentSolicitud?.Instanciasdeaprobacion?.Title || 'Gerencia de Área',
+        impactAreaIds,
+        dueno: duenoDocumento,
+        fechaVigencia: parentSolicitud?.FechadeVigencia || '',
+        fechaAprobacion: parentSolicitud?.FechaDeAprobacionSolicitud || '',
+        resumen: parentSolicitud?.ResumenDocumento || '',
+        version: versionNueva,
+        codigoDocumento: parentSolicitud?.CodigoDocumento || '',
+        relacionados: relacionados.map((item) => ({ codigo: item.codigo, nombre: item.nombre, enlace: item.enlace })),
+        diagramasFlujo: diagramasMantener.map((item) => ({ codigo: item.codigo, nombre: item.nombre, enlace: item.enlace })),
+        tempDestinoFolderServerRelativeUrl: tempDestino,
+        replaceIfExists: true,
+        log
+      });
+      if (!attachResult.ok || !attachResult.tempFileServerRelativeUrl) {
+        throw new Error(attachResult.error || `No se pudo regenerar el adjunto del padre ${parentSolicitudId}.`);
+      }
+      rollbackEntry.tempFileUrl = attachResult.tempFileServerRelativeUrl;
+
+      const movedParent = await stageDocumentoAHistorico({
+        context: params.context,
+        webUrl,
+        solicitudId: parentSolicitudId,
+        fechaAprobacion: parentSolicitud?.FechaDeAprobacionSolicitud || '',
         now,
         todayStamp,
-        log,
-        accionHistorico: 'Baja de documento'
+        log
       });
-      processedSolicitudes.add(row.solicitudId);
-      rowRollbackEntries.push(principal.rollbackEntry);
 
-      for (let j = 0; j < row.documentosHijosIds.length; j++) {
-        const childSolicitudId = row.documentosHijosIds[j];
-        if (processedChildren.has(childSolicitudId) || processedSolicitudes.has(childSolicitudId)) {
-          log(`ℹ️ Fase 6 | Hijo ya procesado, se omite: ${childSolicitudId}`);
-          continue;
+      rollbackEntry.oldOriginalUrl = movedParent.rutaProcesoOriginal;
+      rollbackEntry.oldRenamedUrl = movedParent.rutaProcesoRenombrada;
+      rollbackEntry.historicoUrl = movedParent.rutaHistorico;
+      rollbackEntry.oldOriginalMetadata = movedParent.oldMetadata;
+
+      const procesosFolder = joinFolder(PROCESOS_ROOT, getRelativeFolderWithinProcesos(movedParent.rutaProcesoOriginal));
+      const outputFileName = replaceExtension(currentParentFile.FileLeafRef, '.pdf');
+      publishedUrl = await publishParentFile({
+        context: params.context,
+        webUrl,
+        sourceFileUrl: attachResult.tempFileServerRelativeUrl,
+        targetFolderUrl: procesosFolder,
+        outputFileName,
+        log
+      });
+
+      rollbackEntry.replacementPublishedUrl = publishedUrl;
+
+      await updateParentProcesosMetadataAfterPublish({
+        context: params.context,
+        webUrl,
+        targetFileUrl: publishedUrl,
+        oldMetadata: movedParent.oldMetadata,
+        parentSolicitud,
+        newSolicitudId: Number(newSolicitudId),
+        newVersion: versionNueva
+      });
+
+      await updateExistingDiagramasSolicitud(
+        params.context,
+        webUrl,
+        Number(newSolicitudId),
+        diagramasMantener.map((item) => item.id),
+        log
+      );
+
+      if (diagramToRemove) {
+        try {
+          await deleteListItem(params.context, webUrl, 'Diagramas de Flujo', diagramToRemove.id);
+          log(`🗑️ Fase 9 | Diagrama eliminado de la lista Diagramas de Flujo | ID=${diagramToRemove.id} | Nombre=${diagramToRemove.nombre}`);
+        } catch (deleteDiagramError) {
+          const deleteMessage = deleteDiagramError instanceof Error ? deleteDiagramError.message : String(deleteDiagramError);
+          log(`⚠️ Fase 9 | No se pudo eliminar el diagrama ${diagramToRemove.id} de la lista Diagramas de Flujo. El nuevo documento ya fue generado/publicado. Detalle: ${deleteMessage}`);
         }
-
-        const childResult = await moverDocumentoAHistoricoPorSolicitud({
-          context: params.context,
-          webUrl,
-          solicitudId: childSolicitudId,
-          fechaAprobacionExcel: row.fechaAprobacion,
-          now,
-          todayStamp,
-          log,
-          accionHistorico: 'Baja de documento'
-        });
-        rowRollbackEntries.push(childResult.rollbackEntry);
-        processedChildren.add(childSolicitudId);
-        processedSolicitudes.add(childSolicitudId);
-        log(`👶 Fase 6 | Hijo enviado a histórico: ${childSolicitudId}`);
       }
+      await updateRelacionesDocumentosPadre(params.context, webUrl, parentSolicitudId, Number(newSolicitudId), childIds, log);
+      await updateChildSolicitudesDocPadres(params.context, webUrl, childIds, parentSolicitudId, Number(newSolicitudId), log);
+      await updateListItem(params.context, webUrl, 'Solicitudes', parentSolicitudId, { EsVersionActualDocumento: false });
+      await recycleFile(params.context, webUrl, movedParent.rutaProcesoRenombrada);
 
-      if (parentSolicitudId) {
-        const parentResult = await regenerateParentAfterChildBaja({
+      const newParentProcess = await getCurrentProcessFileBySolicitudId(params.context, webUrl, Number(newSolicitudId));
+      rollbackEntry.replacementProcessItemId = Number(newParentProcess?.Id || 0) || undefined;
+      if (movedParent.processItemId && Number(newParentProcess?.Id || 0)) {
+        await updateChildProcessParentReferences({
           context: params.context,
           webUrl,
-          parentSolicitudId,
-          removedChildSolicitudId: row.solicitudId,
-          fechaAprobacionExcel: row.fechaAprobacion,
-          now,
-          todayStamp,
-          rowRollbackEntries,
+          childSolicitudIds: childIds,
+          oldParentProcessItemId: movedParent.processItemId,
+          newParentProcessItemId: Number(newParentProcess?.Id || 0),
           log
         });
-        parentPublishedUrl = parentResult.publishedUrl;
-        parentNewSolicitudId = parentResult.newParentSolicitudId;
-      }
-
-      for (let j = 0; j < row.diagramasFlujoIds.length; j++) {
-        await deleteListItem(params.context, webUrl, 'Diagramas de Flujo', row.diagramasFlujoIds[j]);
-      }
-      if (row.diagramasFlujoIds.length) {
-        log(`🧭 Fase 6 | Diagramas eliminados sin respaldo: ${row.diagramasFlujoIds.join('/')}`);
       }
 
       rollbackEntries.push(...rowRollbackEntries);
-      diagramRollbackEntries.push(...rowDiagramRollbackEntries);
       ok++;
       reportRows.push({
         EstadoFase2: 'OK',
-        SolicitudOrigenID: row.solicitudId,
-        SolicitudID: parentNewSolicitudId || row.solicitudId,
-        NombreDocumento: childSolicitud?.NombreDocumento || principal.nombreDocumento || row.nombreDocumento || '',
-        NombreArchivo: principal.nombreArchivo || '',
-        CodigoDocumento: principal.codigoDocumento || '',
-        ArchivoProcesoOriginal: principal.nombreArchivo || '',
-        RutaProcesoOriginal: principal.rutaProcesoOriginal || '',
-        ArchivoProcesoRenombrado: principal.rutaProcesoRenombrada.split('/').pop() || '',
-        RutaProcesoRenombrada: principal.rutaProcesoRenombrada || '',
-        RutaHistorico: principal.rutaHistorico || '',
-        RutaNuevoPublicado: parentPublishedUrl,
-        VersionDocumentoAnterior: principal.versionDocumentoAnterior || '',
-        VersionDocumentoNueva: parentNewSolicitudId ? incrementVersion(principal.versionDocumentoAnterior || '') : '',
+        SolicitudOrigenID: parentSolicitudId,
+        SolicitudID: Number(newSolicitudId),
+        NombreDocumento: parentSolicitud?.NombreDocumento || parentSolicitud?.Title || row.documentoPadre,
+        NombreArchivo: movedParent.nombreArchivo || '',
+        CodigoDocumento: movedParent.codigoDocumento || '',
+        ArchivoProcesoOriginal: movedParent.nombreArchivo || '',
+        RutaProcesoOriginal: movedParent.rutaProcesoOriginal || '',
+        ArchivoProcesoRenombrado: movedParent.rutaProcesoRenombrada.split('/').pop() || '',
+        RutaProcesoRenombrada: movedParent.rutaProcesoRenombrada || '',
+        RutaHistorico: movedParent.rutaHistorico || '',
+        RutaNuevoPublicado: publishedUrl || '',
+        VersionDocumentoAnterior: movedParent.versionDocumentoAnterior || '',
+        VersionDocumentoNueva: versionNueva,
         FechaBajaHistorico: todayText,
-        FechaAprobacionBaja: row.fechaAprobacion || '',
+        FechaAprobacionBaja: String(parentSolicitud?.FechaDeAprobacionSolicitud || ''),
         Error: ''
       });
-    } catch (fase6Error) {
-      const message = fase6Error instanceof Error ? fase6Error.message : String(fase6Error);
+      log("✅ Fase 9 | Solicitud versionada " + parentSolicitudId + " -> " + newSolicitudId + " | Diagrama removido=" + (diagramToRemove ? String(diagramToRemove.id) : "ya no existia"));
+    } catch (fase9Error) {
+      const message = fase9Error instanceof Error ? fase9Error.message : String(fase9Error);
 
-      if (rowRollbackEntries.length || rowDiagramRollbackEntries.length) {
+      if (rowRollbackEntries.length) {
         try {
-          await rollbackModificacionFase6({
+          await rollbackModificacionFase8({
             context: params.context,
             webUrl,
             entries: rowRollbackEntries,
-            diagramEntries: rowDiagramRollbackEntries,
             log
           });
-          for (let j = 0; j < rowRollbackEntries.length; j++) {
-            processedSolicitudes.delete(rowRollbackEntries[j].solicitudId);
-            processedChildren.delete(rowRollbackEntries[j].solicitudId);
-          }
-          log(`↩️ Fase 6 | Rollback local ejecutado para la solicitud ${row.solicitudId}`);
+          log(`↩️ Fase 9 | Rollback local ejecutado para el documento padre ${row.documentoPadre}`);
         } catch (rollbackError) {
           const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
-          log(`⚠️ Fase 6 | Falló el rollback local de la solicitud ${row.solicitudId}: ${rollbackMessage}`);
+          log(`⚠️ Fase 9 | Falló el rollback local del documento padre ${row.documentoPadre}: ${rollbackMessage}`);
         }
       }
 
       error++;
       reportRows.push({
         EstadoFase2: 'ERROR',
-        SolicitudOrigenID: row.solicitudId || '',
-        SolicitudID: row.solicitudId || '',
-        NombreDocumento: row.nombreDocumento || '',
-        NombreArchivo: '',
+        SolicitudOrigenID: '',
+        SolicitudID: newSolicitudId || '',
+        NombreDocumento: row.documentoPadre || '',
+        NombreArchivo: row.nombreArchivo || '',
         CodigoDocumento: '',
         ArchivoProcesoOriginal: '',
         RutaProcesoOriginal: '',
         ArchivoProcesoRenombrado: '',
         RutaProcesoRenombrada: '',
         RutaHistorico: '',
-        RutaNuevoPublicado: parentPublishedUrl || '',
+        RutaNuevoPublicado: publishedUrl || '',
         VersionDocumentoAnterior: '',
         VersionDocumentoNueva: '',
         FechaBajaHistorico: todayText,
-        FechaAprobacionBaja: row.fechaAprobacion || '',
+        FechaAprobacionBaja: '',
         Error: message
       });
-      log(`❌ Error Fase 6 | Solicitud=${row.solicitudId} | Documento="${row.nombreDocumento}" | ${message}`);
+      log(`❌ Error Fase 9 | DocumentoPadre="${row.documentoPadre}" | Diagrama="${row.nombreDocumento}" | ${message}`);
     }
   }
 
-  const reportFileName = `Reporte_Fase6_BAJA_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}.xlsx`;
+  const reportFileName = `Reporte_Fase9_BAJA_DIAGRAMA_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}.xlsx`;
   descargarReporteFase2Publicacion(reportRows, reportFileName);
 
   return {
     reportRows,
     rollbackEntries,
-    diagramRollbackEntries,
     reportFileName,
     processed: rows.length,
     ok,
