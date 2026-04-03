@@ -34,7 +34,7 @@ import { ejecutarFase8AltaDiagramaSolicitud } from '../services/modificacionFase
 import { ejecutarFase9BajaDiagramaSolicitud } from '../services/modificacionFase9BajaDiagrama.service';
 import { ejecutarCorreccionSolicitud2460 } from '../services/modificacionCorreccion2460.service';
 import { IFase8RollbackEntry, rollbackModificacionFase8 } from '../services/modificacionFase8Rollback.service';
-import { auditarRelacionesDocumentos } from '../services/relacionesDocumentosAudit.service';
+import { corregirDocPadresDesdeRelaciones } from '../services/docPadresFix.service';
 
 const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, isDarkTheme }) => {
   const [excelFile, setExcelFile] = React.useState<IFilePickerResult | null>(null);
@@ -140,30 +140,37 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
 
 
 
-  const ejecutarAuditoriaRelaciones = React.useCallback(async (): Promise<void> => {
+
+
+  const ejecutarCorreccionDocPadres = React.useCallback(async (): Promise<void> => {
+    if (!excelFile) {
+      setError('Debes seleccionar el Excel de la corrida anterior antes de corregir DocPadres.');
+      return;
+    }
+
     setError(null);
     setIsRunning(true);
-    setLogRevision('Iniciando auditoria de Relaciones Documentos...');
+    setLogRevision('Iniciando correccion de DocPadres desde Relaciones Documentos...');
 
     try {
-      const resultado = await auditarRelacionesDocumentos({
+      const resultado = await corregirDocPadresDesdeRelaciones({
         context,
+        excelFile,
         log: appendLog
       });
 
       descargarArchivo(resultado.blob, resultado.fileName);
-      appendLog('✅ Auditoria terminada. Relaciones analizadas: ' + resultado.totalRelaciones);
-      appendLog('⚠️ Relaciones con observaciones: ' + resultado.relacionesConFaltantes);
-      appendLog('⚠️ Solicitudes hijas con DocPadres faltante/inconsistente: ' + resultado.hijosSinDocPadre);
+      appendLog('✅ Correccion de DocPadres terminada. Hijos procesados: ' + resultado.processed);
+      appendLog('✅ Actualizados: ' + resultado.updated + ' | SKIP: ' + resultado.skipped + ' | ERROR: ' + resultado.error);
       appendLog('📥 Archivo generado: ' + resultado.fileName);
-    } catch (auditError) {
-      const errorMessage = auditError instanceof Error ? auditError.message : String(auditError);
+    } catch (fixError) {
+      const errorMessage = fixError instanceof Error ? fixError.message : String(fixError);
       setError(errorMessage);
-      appendLog('❌ Error en auditoria de Relaciones Documentos: ' + errorMessage);
+      appendLog('❌ Error en correccion de DocPadres: ' + errorMessage);
     } finally {
       setIsRunning(false);
     }
-  }, [appendLog, context, descargarArchivo]);
+  }, [appendLog, context, descargarArchivo, excelFile]);
 
   const ejecutarFase1 = React.useCallback(async (): Promise<void> => {
     if (!excelFile) {
@@ -1010,10 +1017,11 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
 
                   <Stack horizontal wrap tokens={{ childrenGap: 12 }}>
                     <DefaultButton text={isRunning ? 'Revisando...' : 'Revisar archivo'} onClick={revisarArchivo} disabled={!excelFile || isRunning} />
+
                     <DefaultButton
-                      text={isRunning ? 'Auditando relaciones...' : 'Auditar Relaciones Documentos'}
-                      onClick={() => { void ejecutarAuditoriaRelaciones(); }}
-                      disabled={isRunning}
+                      text={isRunning ? 'Corrigiendo DocPadres...' : 'Corregir DocPadres'}
+                      onClick={() => { void ejecutarCorreccionDocPadres(); }}
+                      disabled={!excelFile || isRunning}
                     />
                   </Stack>
                 </div>
