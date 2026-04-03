@@ -18,7 +18,6 @@ import { FolderPicker } from '@pnp/spfx-controls-react/lib/FolderPicker';
 import styles from './Modificacion.module.scss';
 import type { IModificacionProps } from './IModificacionProps';
 import { revisarExcelModificacion } from '../services/modificacionRevision.service';
-import { buscarSolicitudesDuplicadas } from '../services/solicitudesDuplicadas.service';
 import { ejecutarFase1DocumentosSinHijosNiFlujos } from '../services/modificacionFase1.service';
 import { rollbackModificacionFase1 } from '../services/modificacionFase1Rollback.service';
 import { IFase2RollbackEntry, ejecutarFase2PublicacionDocumentosSinHijos } from '../services/modificacionFase2Publicacion.service';
@@ -35,6 +34,7 @@ import { ejecutarFase8AltaDiagramaSolicitud } from '../services/modificacionFase
 import { ejecutarFase9BajaDiagramaSolicitud } from '../services/modificacionFase9BajaDiagrama.service';
 import { ejecutarCorreccionSolicitud2460 } from '../services/modificacionCorreccion2460.service';
 import { IFase8RollbackEntry, rollbackModificacionFase8 } from '../services/modificacionFase8Rollback.service';
+import { auditarRelacionesDocumentos } from '../services/relacionesDocumentosAudit.service';
 
 const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, isDarkTheme }) => {
   const [excelFile, setExcelFile] = React.useState<IFilePickerResult | null>(null);
@@ -138,27 +138,28 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
     void ejecutarRevision();
   }, [ejecutarRevision]);
 
-  const ejecutarBusquedaSolicitudesDuplicadas = React.useCallback(async (): Promise<void> => {
+
+
+  const ejecutarAuditoriaRelaciones = React.useCallback(async (): Promise<void> => {
     setError(null);
     setIsRunning(true);
-    setLogRevision('Iniciando busqueda de solicitudes duplicadas...');
+    setLogRevision('Iniciando auditoria de Relaciones Documentos...');
 
     try {
-      const resultado = await buscarSolicitudesDuplicadas({
+      const resultado = await auditarRelacionesDocumentos({
         context,
         log: appendLog
       });
 
       descargarArchivo(resultado.blob, resultado.fileName);
-      appendLog('✅ Busqueda terminada. Solicitudes analizadas: ' + resultado.totalSolicitudes);
-      appendLog('⚠️ Grupos duplicados: ' + resultado.duplicatedGroups);
-      appendLog('⚠️ Solicitudes duplicadas exportadas: ' + resultado.duplicatedRows);
-      appendLog('ℹ️ Solicitudes no vigentes dentro del reporte: ' + resultado.nonCurrentRows);
+      appendLog('✅ Auditoria terminada. Relaciones analizadas: ' + resultado.totalRelaciones);
+      appendLog('⚠️ Relaciones con observaciones: ' + resultado.relacionesConFaltantes);
+      appendLog('⚠️ Solicitudes hijas con DocPadres faltante/inconsistente: ' + resultado.hijosSinDocPadre);
       appendLog('📥 Archivo generado: ' + resultado.fileName);
-    } catch (searchError) {
-      const errorMessage = searchError instanceof Error ? searchError.message : String(searchError);
+    } catch (auditError) {
+      const errorMessage = auditError instanceof Error ? auditError.message : String(auditError);
       setError(errorMessage);
-      appendLog('❌ Error al buscar solicitudes duplicadas: ' + errorMessage);
+      appendLog('❌ Error en auditoria de Relaciones Documentos: ' + errorMessage);
     } finally {
       setIsRunning(false);
     }
@@ -1009,13 +1010,11 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
 
                   <Stack horizontal wrap tokens={{ childrenGap: 12 }}>
                     <DefaultButton text={isRunning ? 'Revisando...' : 'Revisar archivo'} onClick={revisarArchivo} disabled={!excelFile || isRunning} />
-                    {false && (
-                      <DefaultButton
-                        text={isRunning ? 'Buscando duplicados...' : 'Buscar Solicitudes duplicadas'}
-                        onClick={() => { void ejecutarBusquedaSolicitudesDuplicadas(); }}
-                        disabled={isRunning}
-                      />
-                    )}
+                    <DefaultButton
+                      text={isRunning ? 'Auditando relaciones...' : 'Auditar Relaciones Documentos'}
+                      onClick={() => { void ejecutarAuditoriaRelaciones(); }}
+                      disabled={isRunning}
+                    />
                   </Stack>
                 </div>
               </div>
