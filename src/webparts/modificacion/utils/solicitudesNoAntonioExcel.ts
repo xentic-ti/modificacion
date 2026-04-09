@@ -1,62 +1,47 @@
 /* eslint-disable */
-// @ts-nocheck
 import * as XLSX from 'xlsx';
 
-export interface ISolicitudDuplicadaReportRow {
-  ClaveCodigoDocumento: string;
-  TotalCoincidencias: number;
-  TotalTitulosDistintos: number;
+export interface ISolicitudNoAntonioReportRow {
   Id: number;
   Title: string;
   NombreDocumento: string;
   CodigoDocumento: string;
   VersionDocumento: string;
   EsVersionActualDocumento: string;
-  DocumentosApoyo: string;
-  Estado: string;
   EstadoId?: number | '';
   CreadoPor: string;
   CreadoPorEmail: string;
-  DocumentosPadreIds: string;
-  DocumentosHijosIds: string;
-  FechaDeAprobacionSolicitud: string;
-  FechadeVigencia: string;
-  FechaDePublicacionSolicitud: string;
   Created: string;
   Modified: string;
+  TieneDocumentosHijos: string;
+  TotalDocumentosHijos: number;
+  DocumentosHijosIds: string;
 }
 
 const headers = [
-  'ClaveCodigoDocumento',
-  'TotalCoincidencias',
-  'TotalTitulosDistintos',
   'Id',
   'Title',
   'NombreDocumento',
   'CodigoDocumento',
   'VersionDocumento',
   'EsVersionActualDocumento',
-  'DocumentosApoyo',
-  'Estado',
   'EstadoId',
   'CreadoPor',
   'CreadoPorEmail',
-  'DocumentosPadreIds',
-  'DocumentosHijosIds',
-  'FechaDeAprobacionSolicitud',
-  'FechadeVigencia',
-  'FechaDePublicacionSolicitud',
   'Created',
-  'Modified'
+  'Modified',
+  'TieneDocumentosHijos',
+  'TotalDocumentosHijos',
+  'DocumentosHijosIds'
 ];
 
-function autoFitColumns(rows: ISolicitudDuplicadaReportRow[]): Array<{ wch: number; }> {
+function autoFitColumns(rows: ISolicitudNoAntonioReportRow[]): Array<{ wch: number; }> {
   const widths = headers.map((header) => ({ wch: header.length + 2 }));
 
   rows.forEach((row) => {
     headers.forEach((header, index) => {
       const value = String((row as any)[header] ?? '');
-      widths[index].wch = Math.min(Math.max(widths[index].wch, value.length + 2), 40);
+      widths[index].wch = Math.min(Math.max(widths[index].wch, value.length + 2), 50);
     });
   });
 
@@ -102,19 +87,16 @@ function buildDateString(value: Date): string {
   return `${pad(value.getDate())}/${pad(value.getMonth() + 1)}/${value.getFullYear()} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
 }
 
-function normalizeRows(rows: ISolicitudDuplicadaReportRow[]): ISolicitudDuplicadaReportRow[] {
+function normalizeRows(rows: ISolicitudNoAntonioReportRow[]): ISolicitudNoAntonioReportRow[] {
   return rows.map((row) => ({
     ...row,
-    FechaDeAprobacionSolicitud: formatDateValue(row.FechaDeAprobacionSolicitud),
-    FechadeVigencia: formatDateValue(row.FechadeVigencia),
-    FechaDePublicacionSolicitud: formatDateValue(row.FechaDePublicacionSolicitud),
     Created: formatDateValue(row.Created),
     Modified: formatDateValue(row.Modified)
   }));
 }
 
-export function buildSolicitudesDuplicadasWorkbook(
-  rows: ISolicitudDuplicadaReportRow[],
+export function buildSolicitudesNoAntonioWorkbook(
+  rows: ISolicitudNoAntonioReportRow[],
   fileName?: string
 ): { blob: Blob; fileName: string; } {
   const safeRows = normalizeRows(Array.isArray(rows) ? rows : []);
@@ -122,7 +104,7 @@ export function buildSolicitudesDuplicadasWorkbook(
   const worksheet = XLSX.utils.json_to_sheet(safeRows, { header: headers });
 
   worksheet['!cols'] = autoFitColumns(safeRows);
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'SolicitudesDuplicadas');
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Solicitudes');
 
   const output = XLSX.write(workbook, {
     bookType: 'xlsx',
@@ -132,7 +114,7 @@ export function buildSolicitudesDuplicadasWorkbook(
   const now = new Date();
   const pad = (value: number): string => String(value).padStart(2, '0');
   const defaultName =
-    `Solicitudes_Duplicadas_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
+    `Solicitudes_No_Creadas_Por_Antonio_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
     `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.xlsx`;
 
   return {

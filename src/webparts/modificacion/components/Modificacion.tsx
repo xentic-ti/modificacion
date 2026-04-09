@@ -35,6 +35,8 @@ import { ejecutarFase9BajaDiagramaSolicitud } from '../services/modificacionFase
 import { ejecutarCorreccionSolicitud2460 } from '../services/modificacionCorreccion2460.service';
 import { IFase8RollbackEntry, rollbackModificacionFase8 } from '../services/modificacionFase8Rollback.service';
 import { corregirDocPadresDesdeRelaciones } from '../services/docPadresFix.service';
+import { exportarSolicitudesNoCreadasPorAntonio } from '../services/solicitudesNoAntonio.service';
+import { buscarSolicitudesDuplicadas } from '../services/solicitudesDuplicadas.service';
 
 const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, isDarkTheme }) => {
   const [excelFile, setExcelFile] = React.useState<IFilePickerResult | null>(null);
@@ -171,6 +173,58 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       setIsRunning(false);
     }
   }, [appendLog, context, descargarArchivo, excelFile]);
+
+  const ejecutarReporteSolicitudesNoAntonio = React.useCallback(async (): Promise<void> => {
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando reporte de solicitudes no creadas por Antonio Sánchez Panta...');
+
+    try {
+      const resultado = await exportarSolicitudesNoCreadasPorAntonio({
+        context,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog(`✅ Reporte generado. Total solicitudes leidas: ${resultado.totalSolicitudes}`);
+      appendLog(`✅ Incluidas en Excel: ${resultado.totalFiltradas}`);
+      appendLog(`ℹ️ Excluidas por Antonio Sánchez Panta: ${resultado.totalExcluidasAntonio}`);
+      appendLog(`📎 Incluidas con hijos: ${resultado.conHijos}`);
+      appendLog(`📥 Archivo generado: ${resultado.fileName}`);
+    } catch (reportError) {
+      const errorMessage = reportError instanceof Error ? reportError.message : String(reportError);
+      setError(errorMessage);
+      appendLog(`❌ Error generando reporte de solicitudes: ${errorMessage}`);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, descargarArchivo]);
+
+  const ejecutarReporteSolicitudesDuplicadas = React.useCallback(async (): Promise<void> => {
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando reporte de solicitudes con CodigoDocumento duplicado y distinto titulo...');
+
+    try {
+      const resultado = await buscarSolicitudesDuplicadas({
+        context,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog(`✅ Reporte generado. Total solicitudes leidas: ${resultado.totalSolicitudes}`);
+      appendLog(`⚠️ Grupos duplicados con distinto titulo: ${resultado.duplicatedGroups}`);
+      appendLog(`⚠️ Filas incluidas en Excel: ${resultado.duplicatedRows}`);
+      appendLog(`ℹ️ Filas no vigentes dentro del reporte: ${resultado.nonCurrentRows}`);
+      appendLog(`📥 Archivo generado: ${resultado.fileName}`);
+    } catch (reportError) {
+      const errorMessage = reportError instanceof Error ? reportError.message : String(reportError);
+      setError(errorMessage);
+      appendLog(`❌ Error generando reporte de duplicados: ${errorMessage}`);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, descargarArchivo]);
 
   const ejecutarFase1 = React.useCallback(async (): Promise<void> => {
     if (!excelFile) {
@@ -1022,6 +1076,18 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                       text={isRunning ? 'Corrigiendo DocPadres...' : 'Corregir DocPadres'}
                       onClick={() => { void ejecutarCorreccionDocPadres(); }}
                       disabled={!excelFile || isRunning}
+                    />
+
+                    <DefaultButton
+                      text={isRunning ? 'Generando reporte...' : 'Reporte: no creadas por Antonio'}
+                      onClick={() => { void ejecutarReporteSolicitudesNoAntonio(); }}
+                      disabled={isRunning}
+                    />
+
+                    <DefaultButton
+                      text={isRunning ? 'Generando duplicados...' : 'Reporte: duplicadas por codigo'}
+                      onClick={() => { void ejecutarReporteSolicitudesDuplicadas(); }}
+                      disabled={isRunning}
                     />
                   </Stack>
                 </div>
