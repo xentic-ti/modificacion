@@ -35,11 +35,14 @@ import { ejecutarFase9BajaDiagramaSolicitud } from '../services/modificacionFase
 import { ejecutarCorreccionSolicitud2460 } from '../services/modificacionCorreccion2460.service';
 import { IFase8RollbackEntry, rollbackModificacionFase8 } from '../services/modificacionFase8Rollback.service';
 import { corregirDocPadresDesdeRelaciones } from '../services/docPadresFix.service';
+import { copiarHijosRelacionesDocumentos } from '../services/copiarHijos.service';
 import { exportarSolicitudesNoCreadasPorAntonio } from '../services/solicitudesNoAntonio.service';
 import { buscarSolicitudesDuplicadas } from '../services/solicitudesDuplicadas.service';
 
 const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, isDarkTheme }) => {
   const [excelFile, setExcelFile] = React.useState<IFilePickerResult | null>(null);
+  const [copiarHijosPadreOrigenId, setCopiarHijosPadreOrigenId] = React.useState<string>('');
+  const [copiarHijosPadreDestinoId, setCopiarHijosPadreDestinoId] = React.useState<string>('');
   const [sourceFolderUrl, setSourceFolderUrl] = React.useState<string>('');
   const [error, setError] = React.useState<string | null>(null);
   const [isRunning, setIsRunning] = React.useState<boolean>(false);
@@ -173,6 +176,38 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       setIsRunning(false);
     }
   }, [appendLog, context, descargarArchivo, excelFile]);
+
+  const ejecutarCopiarHijos = React.useCallback(async (): Promise<void> => {
+    if (!copiarHijosPadreOrigenId.trim() || !copiarHijosPadreDestinoId.trim()) {
+      setError('Debes ingresar el ID padre origen y el ID padre destino para copiar hijos.');
+      return;
+    }
+
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando copia de hijos en Relaciones Documentos...');
+
+    try {
+      const resultado = await copiarHijosRelacionesDocumentos({
+        context,
+        padreOrigenId: copiarHijosPadreOrigenId,
+        padreDestinoId: copiarHijosPadreDestinoId,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog('✅ Copia de hijos terminada. Hijos origen: ' + resultado.totalHijos);
+      appendLog('✅ Relaciones creadas: ' + resultado.creadas + ' | SKIP: ' + resultado.omitidas + ' | ERROR: ' + resultado.errores);
+      appendLog('✅ DocPadres actualizados: ' + resultado.docPadresActualizados + ' | SKIP: ' + resultado.docPadresOmitidos);
+      appendLog('📥 Archivo generado: ' + resultado.fileName);
+    } catch (copyError) {
+      const errorMessage = copyError instanceof Error ? copyError.message : String(copyError);
+      setError(errorMessage);
+      appendLog('❌ Error copiando hijos: ' + errorMessage);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, copiarHijosPadreDestinoId, copiarHijosPadreOrigenId, descargarArchivo]);
 
   const ejecutarReporteSolicitudesNoAntonio = React.useCallback(async (): Promise<void> => {
     setError(null);
@@ -1098,6 +1133,41 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                 <Text className={styles.statusValue}>
                   {excelFile ? excelFile.fileName : 'Aun no se ha seleccionado ningun archivo.'}
                 </Text>
+              </div>
+
+              <div className={styles.utilityCard}>
+                <Stack tokens={{ childrenGap: 12 }}>
+                  <div>
+                    <Text variant="mediumPlus" className={styles.statusTitle}>Copiar hijos</Text>
+                    <Text className={styles.statusValue}>
+                      Genera relaciones nuevas con los mismos hijos de un padre origen, usando otro ID como padre destino.
+                    </Text>
+                  </div>
+
+                  <Stack horizontal wrap tokens={{ childrenGap: 12 }}>
+                    <TextField
+                      label="ID padre origen"
+                      value={copiarHijosPadreOrigenId}
+                      onChange={(_event, value) => setCopiarHijosPadreOrigenId(value || '')}
+                      disabled={isRunning}
+                      styles={{ root: { width: 180 } }}
+                    />
+                    <TextField
+                      label="ID padre destino"
+                      value={copiarHijosPadreDestinoId}
+                      onChange={(_event, value) => setCopiarHijosPadreDestinoId(value || '')}
+                      disabled={isRunning}
+                      styles={{ root: { width: 180 } }}
+                    />
+                    <Stack verticalAlign="end">
+                      <DefaultButton
+                        text={isRunning ? 'Copiando hijos...' : 'Copiar hijos'}
+                        onClick={() => { void ejecutarCopiarHijos(); }}
+                        disabled={!copiarHijosPadreOrigenId.trim() || !copiarHijosPadreDestinoId.trim() || isRunning}
+                      />
+                    </Stack>
+                  </Stack>
+                </Stack>
               </div>
 
               {error && (
