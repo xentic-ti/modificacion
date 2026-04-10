@@ -179,6 +179,7 @@ export async function copiarHijosRelacionesDocumentos(params: {
 
   const parentField = await getFieldInternalName(params.context, webUrl, 'Relaciones Documentos', 'DocumentoPadre');
   const childField = await getFieldInternalName(params.context, webUrl, 'Relaciones Documentos', 'DocumentoHijo');
+  const estadoRelacionField = await resolveFirstExistingFieldInternalName(params.context, webUrl, 'Relaciones Documentos', ['EstadoRelacion', 'Estado Relacion', 'Estado Relación']);
   const parentFieldId = `${parentField}Id`;
   const childFieldId = `${childField}Id`;
 
@@ -312,7 +313,8 @@ export async function copiarHijosRelacionesDocumentos(params: {
         relacionNuevaId = await addListItem(params.context, webUrl, 'Relaciones Documentos', {
           Title: relacionNuevaTitle,
           [parentFieldId]: padreDestinoId,
-          [childFieldId]: hijoId
+          [childFieldId]: hijoId,
+          [estadoRelacionField]: 'Vigente'
         });
 
         creadas++;
