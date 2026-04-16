@@ -38,6 +38,8 @@ import { corregirDocPadresDesdeRelaciones } from '../services/docPadresFix.servi
 import { copiarHijosRelacionesDocumentos } from '../services/copiarHijos.service';
 import { exportarSolicitudesNoCreadasPorAntonio } from '../services/solicitudesNoAntonio.service';
 import { buscarSolicitudesDuplicadas } from '../services/solicitudesDuplicadas.service';
+import { ejecutarCambioInstanciaDesdeExcel } from '../services/modificacionCambioInstancia.service';
+import { ejecutarCorreccionCodigosDuplicadosDesdeExcel } from '../services/modificacionCodigoDuplicado.service';
 
 const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, isDarkTheme }) => {
   const [excelFile, setExcelFile] = React.useState<IFilePickerResult | null>(null);
@@ -260,6 +262,68 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       setIsRunning(false);
     }
   }, [appendLog, context, descargarArchivo]);
+
+  const ejecutarCambioInstancia = React.useCallback(async (): Promise<void> => {
+    if (!excelFile) {
+      setError('Debes seleccionar un Excel antes de ejecutar el cambio de instancia.');
+      appendLog('No se pudo iniciar el cambio de instancia porque no hay Excel seleccionado.');
+      return;
+    }
+
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando cambio masivo de instancia desde Excel...');
+
+    try {
+      const resultado = await ejecutarCambioInstanciaDesdeExcel({
+        context,
+        excelFile,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog(`✅ Cambio de instancia terminado. Filas elegibles: ${resultado.processed}`);
+      appendLog(`✅ Actualizadas: ${resultado.updated} | SKIP: ${resultado.skipped} | ERROR: ${resultado.error}`);
+      appendLog(`📥 Archivo generado: ${resultado.fileName}`);
+    } catch (changeError) {
+      const errorMessage = changeError instanceof Error ? changeError.message : String(changeError);
+      setError(errorMessage);
+      appendLog(`❌ Error en cambio de instancia: ${errorMessage}`);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, descargarArchivo, excelFile]);
+
+  const ejecutarCorreccionCodigosDuplicados = React.useCallback(async (): Promise<void> => {
+    if (!excelFile) {
+      setError('Debes seleccionar un Excel antes de ejecutar la corrección de códigos duplicados.');
+      appendLog('No se pudo iniciar la corrección de códigos duplicados porque no hay Excel seleccionado.');
+      return;
+    }
+
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando corrección de códigos de documento duplicados desde Excel...');
+
+    try {
+      const resultado = await ejecutarCorreccionCodigosDuplicadosDesdeExcel({
+        context,
+        excelFile,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog(`✅ Corrección de códigos duplicados terminada. Filas objetivo: ${resultado.processed}`);
+      appendLog(`✅ Actualizadas: ${resultado.updated} | SKIP/KEEP: ${resultado.skipped} | ERROR: ${resultado.error}`);
+      appendLog(`📥 Archivo generado: ${resultado.fileName}`);
+    } catch (changeError) {
+      const errorMessage = changeError instanceof Error ? changeError.message : String(changeError);
+      setError(errorMessage);
+      appendLog(`❌ Error en corrección de códigos duplicados: ${errorMessage}`);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, descargarArchivo, excelFile]);
 
   const ejecutarFase1 = React.useCallback(async (): Promise<void> => {
     if (!excelFile) {
@@ -1108,6 +1172,12 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                     <DefaultButton text={isRunning ? 'Revisando...' : 'Revisar archivo'} onClick={revisarArchivo} disabled={!excelFile || isRunning} />
 
                     <DefaultButton
+                      text={isRunning ? 'Cambiando instancia...' : 'Cambiar instancia desde Excel'}
+                      onClick={() => { void ejecutarCambioInstancia(); }}
+                      disabled={!excelFile || isRunning}
+                    />
+
+                    <DefaultButton
                       text={isRunning ? 'Corrigiendo DocPadres...' : 'Corregir DocPadres'}
                       onClick={() => { void ejecutarCorreccionDocPadres(); }}
                       disabled={!excelFile || isRunning}
@@ -1123,6 +1193,12 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                       text={isRunning ? 'Generando duplicados...' : 'Reporte: duplicadas por codigo'}
                       onClick={() => { void ejecutarReporteSolicitudesDuplicadas(); }}
                       disabled={isRunning}
+                    />
+
+                    <DefaultButton
+                      text={isRunning ? 'Corrigiendo codigos...' : 'Corregir codigos duplicados'}
+                      onClick={() => { void ejecutarCorreccionCodigosDuplicados(); }}
+                      disabled={!excelFile || isRunning}
                     />
                   </Stack>
                 </div>
