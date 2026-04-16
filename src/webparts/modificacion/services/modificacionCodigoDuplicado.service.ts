@@ -65,6 +65,8 @@ type IExecutionTrace = {
   procesoReemplazado: string;
   solicitudActualizada: string;
   metadataProcesosActualizada: string;
+  tempFileUrl: string;
+  rollbackOmitido: string;
   rollbackCodigoRegistro: string;
   rollbackAdjunto: string;
   rollbackProceso: string;
@@ -153,6 +155,17 @@ function parseDateSafe(value: any): number {
 
   const iso = Date.parse(text);
   return Number.isFinite(iso) ? iso : 0;
+}
+
+function obtenerPrimerNombreYApellido(displayName: string): string {
+  const limpio = (displayName || "").replace(/\s+/g, " ").trim();
+  if (!limpio) return "";
+  const partes = limpio.split(" ").filter(Boolean);
+
+  if (partes.length === 3) return `${partes[0]} ${partes[1]}`;
+  if (partes.length === 4) return `${partes[0]} ${partes[2]}`;
+  if (partes.length >= 2) return `${partes[0]} ${partes[1]}`;
+  return partes[0] || "";
 }
 
 function pickEditableAttachment(files: Array<{ FileName: string; ServerRelativeUrl: string; }>): { FileName: string; ServerRelativeUrl: string; } | null {
@@ -246,7 +259,7 @@ async function getAreaGerenteNombre(context: WebPartContext, webUrl: string, are
     context,
     `${webUrl}/_api/web/lists/getbytitle('Áreas de Negocio')/items(${areaId})?$select=Id,Gerente/Title&$expand=Gerente`
   );
-  return String(item?.Gerente?.Title || '').trim();
+  return obtenerPrimerNombreYApellido(String(item?.Gerente?.Title || '').trim());
 }
 
 async function getSolicitudesRelacionadas(
@@ -814,24 +827,58 @@ function chooseGroupTargets(group: ISolicitudRuntimeInfo[]): {
   };
 }
 
+function isPdfConversionFailure(error: any): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  const trace = error?.executionTrace as IExecutionTrace | undefined;
+  return (trace?.pasoFallido || '') === 'ReemplazarProceso' && /No se pudo convertir a PDF/i.test(message);
+}
+
+function shouldPreserveTempWithoutRollback(trace: IExecutionTrace | undefined, error: any): boolean {
+  return !!trace?.tempFileUrl && isPdfConversionFailure(error);
+}
+
 async function enrichRowInfo(params: {
   context: WebPartContext;
   webUrl: string;
   input: IInputRow;
+  rowLabel?: string;
+  log?: LogFn;
 }): Promise<ISolicitudRuntimeInfo> {
+  const log = params.log || (() => undefined);
+  const rowLabel = params.rowLabel || `Fila ${params.input.rowIndex}`;
+
+  log(`🔎 ${rowLabel} | Leyendo solicitud ${params.input.id}...`);
   const solicitud = await getSolicitudById(params.context, params.webUrl, params.input.id);
+
+  log(`🧩 ${rowLabel} | Resolviendo tipo documental...`);
   const tipoDocumentoData = await getCodigosTipoDocumentoByTipoDocumentoId(
     params.context,
     params.webUrl,
     'Solicitudes',
     Number(solicitud?.TipoDocumentoId || 0)
   );
+
+  log(`👨‍👩‍👧 ${rowLabel} | Leyendo relaciones de hijos...`);
   const childIds = await getChildSolicitudIdsByParent(params.context, params.webUrl, params.input.id);
+
+  log(`🔗 ${rowLabel} | Armando relacionados (${childIds.length})...`);
   const related = await getSolicitudesRelacionadas(params.context, params.webUrl, childIds);
+
+  log(`🗺️ ${rowLabel} | Leyendo diagramas de flujo...`);
   const diagramas = await getDiagramasFlujoRowsBySolicitud(params.context, params.webUrl, params.input.id);
+
+  log(`📄 ${rowLabel} | Buscando archivo vigente en Procesos...`);
   const processFile = await getCurrentProcessFileBySolicitudId(params.context, params.webUrl, params.input.id);
+
+  log(`📎 ${rowLabel} | Leyendo adjuntos de la solicitud...`);
   const attachments = await getAttachmentFiles(params.context, params.webUrl, 'Solicitudes', params.input.id);
   const attachment = pickEditableAttachment(attachments as any);
+
+  log(
+    `✅ ${rowLabel} | Enriquecida | Categoria=${tipoDocumentoData.codigoCategoria || ''} | ` +
+    `Hijos=${childIds.length} | Diagramas=${diagramas.length} | ` +
+    `Proceso=${processFile?.FileRef ? 'Sí' : 'No'} | AdjuntoEditable=${attachment?.FileName ? 'Sí' : 'No'}`
+  );
 
   return {
     rowIndex: params.input.rowIndex,
@@ -856,9 +903,11 @@ async function applyCodigoChange(params: {
   context: WebPartContext;
   webUrl: string;
   info: ISolicitudRuntimeInfo;
+  rowLabel?: string;
   log?: LogFn;
 }): Promise<{ attachmentFileName: string; processFileUrl: string; tempFileUrl: string; nuevoCodigo: string; codigoRegistroId: number; trace: IExecutionTrace; }> {
   const log = params.log || (() => undefined);
+  const rowLabel = params.rowLabel || `Fila ${params.info.rowIndex}`;
   const solicitudId = params.info.id;
   const solicitud = params.info.solicitud;
   const processFile = params.info.processFile;
@@ -905,6 +954,8 @@ async function applyCodigoChange(params: {
     procesoReemplazado: 'No',
     solicitudActualizada: 'No',
     metadataProcesosActualizada: 'No',
+    tempFileUrl: '',
+    rollbackOmitido: 'No',
     rollbackCodigoRegistro: 'No',
     rollbackAdjunto: 'No',
     rollbackProceso: 'No',
@@ -914,6 +965,7 @@ async function applyCodigoChange(params: {
 
   try {
     trace.pasoFallido = 'ReservarCodigo';
+    log(`🏷️ ${rowLabel} | Reservando nuevo código...`);
     const registroCodigo = await registerCodigoDocumentoWithRetry({
       context: params.context,
       webUrl: params.webUrl,
@@ -926,9 +978,10 @@ async function applyCodigoChange(params: {
     trace.codigoRegistroId = codigoRegistroId;
     trace.codigoReservado = 'Si';
 
-    log(`🛠️ Solicitud ${solicitudId} | Código actual="${oldCodigo}" | Nuevo="${nuevoCodigo}" | RegistroCodigo=${codigoRegistroId}`);
+    log(`🛠️ ${rowLabel} | Solicitud ${solicitudId} | Código actual="${oldCodigo}" | Nuevo="${nuevoCodigo}" | RegistroCodigo=${codigoRegistroId}`);
 
     trace.pasoFallido = 'RegenerarAdjunto';
+    log(`🧾 ${rowLabel} | Regenerando adjunto...`);
     const attachResult = await fillAndAttachFromServerRelativeUrl({
       context: params.context,
       webUrl: params.webUrl,
@@ -959,8 +1012,10 @@ async function applyCodigoChange(params: {
     attachmentUpdated = true;
     tempFileUrl = attachResult.tempFileServerRelativeUrl;
     trace.adjuntoRegenerado = 'Si';
+    trace.tempFileUrl = tempFileUrl;
 
     trace.pasoFallido = 'ReemplazarProceso';
+    log(`📚 ${rowLabel} | Reemplazando archivo en Procesos...`);
     await publishReplacementToProcesos({
       context: params.context,
       webUrl: params.webUrl,
@@ -972,6 +1027,7 @@ async function applyCodigoChange(params: {
     trace.procesoReemplazado = 'Si';
 
     trace.pasoFallido = 'ActualizarSolicitud';
+    log(`📝 ${rowLabel} | Actualizando Solicitudes...`);
     await updateListItem(params.context, params.webUrl, 'Solicitudes', solicitudId, {
       CodigoDocumento: nuevoCodigo
     });
@@ -979,12 +1035,14 @@ async function applyCodigoChange(params: {
     trace.solicitudActualizada = 'Si';
 
     trace.pasoFallido = 'ActualizarMetadataProcesos';
+    log(`🗂️ ${rowLabel} | Actualizando metadata en Procesos...`);
     await updateFileMetadataByPath(params.context, params.webUrl, processFile.FileRef, {
       Codigodedocumento: nuevoCodigo
     });
     processMetadataUpdated = true;
     trace.metadataProcesosActualizada = 'Si';
     trace.pasoFallido = '';
+    log(`✅ ${rowLabel} | Solicitud ${solicitudId} actualizada correctamente.`);
 
     return {
       attachmentFileName: attachment.FileName,
@@ -995,6 +1053,13 @@ async function applyCodigoChange(params: {
       trace
     };
   } catch (error) {
+    if (shouldPreserveTempWithoutRollback(trace, error)) {
+      trace.rollbackOmitido = 'Si';
+      log(`⚠️ ${rowLabel} | Falló la conversión a PDF. Se conserva el documento generado en TEMP y no se ejecuta rollback.`);
+      (error as any).executionTrace = trace;
+      throw error;
+    }
+
     if (processMetadataUpdated) {
       try {
         await updateFileMetadataByPath(params.context, params.webUrl, processFile.FileRef, {
@@ -1092,17 +1157,19 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
   const idxProceso = headers.length + 4;
   const idxAdjunto = headers.length + 5;
   const idxPasoFallido = headers.length + 6;
-  const idxCodigoRegistroId = headers.length + 7;
-  const idxCodigoReservado = headers.length + 8;
-  const idxAdjuntoRegenerado = headers.length + 9;
-  const idxProcesoReemplazado = headers.length + 10;
-  const idxSolicitudActualizada = headers.length + 11;
-  const idxMetadataProcesosActualizada = headers.length + 12;
-  const idxRollbackCodigoRegistro = headers.length + 13;
-  const idxRollbackAdjunto = headers.length + 14;
-  const idxRollbackProceso = headers.length + 15;
-  const idxRollbackSolicitud = headers.length + 16;
-  const idxRollbackMetadataProcesos = headers.length + 17;
+  const idxArchivoTemp = headers.length + 7;
+  const idxCodigoRegistroId = headers.length + 8;
+  const idxCodigoReservado = headers.length + 9;
+  const idxAdjuntoRegenerado = headers.length + 10;
+  const idxProcesoReemplazado = headers.length + 11;
+  const idxSolicitudActualizada = headers.length + 12;
+  const idxMetadataProcesosActualizada = headers.length + 13;
+  const idxRollbackOmitido = headers.length + 14;
+  const idxRollbackCodigoRegistro = headers.length + 15;
+  const idxRollbackAdjunto = headers.length + 16;
+  const idxRollbackProceso = headers.length + 17;
+  const idxRollbackSolicitud = headers.length + 18;
+  const idxRollbackMetadataProcesos = headers.length + 19;
 
   headers[idxEstado] = 'EstadoCorreccionCodigoDuplicado';
   headers[idxDetalle] = 'DetalleCorreccionCodigoDuplicado';
@@ -1111,12 +1178,14 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
   headers[idxProceso] = 'ArchivoProcesoCorregido';
   headers[idxAdjunto] = 'AdjuntoCorregido';
   headers[idxPasoFallido] = 'PasoFallido';
+  headers[idxArchivoTemp] = 'ArchivoTempGenerado';
   headers[idxCodigoRegistroId] = 'CodigoRegistroId';
   headers[idxCodigoReservado] = 'CodigoReservado';
   headers[idxAdjuntoRegenerado] = 'AdjuntoRegenerado';
   headers[idxProcesoReemplazado] = 'ProcesoReemplazado';
   headers[idxSolicitudActualizada] = 'SolicitudActualizada';
   headers[idxMetadataProcesosActualizada] = 'MetadataProcesosActualizada';
+  headers[idxRollbackOmitido] = 'RollbackOmitido';
   headers[idxRollbackCodigoRegistro] = 'RollbackCodigoRegistro';
   headers[idxRollbackAdjunto] = 'RollbackAdjunto';
   headers[idxRollbackProceso] = 'RollbackProceso';
@@ -1166,6 +1235,7 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
 
   for (let i = 0; i < inputRows.length; i++) {
     const row = outputGrid[inputRows[i].rowIndex] || [];
+    const rowLabel = `Fila ${i + 1}/${inputRows.length}`;
 
     if (!inputRows[i].id) {
       row[idxEstado] = 'ERROR';
@@ -1192,10 +1262,13 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
     }
 
     try {
+      log(`⏳ ${rowLabel} | Preparando solicitud ${inputRows[i].id || ''}...`);
       const info = await enrichRowInfo({
         context: params.context,
         webUrl,
-        input: inputRows[i]
+        input: inputRows[i],
+        rowLabel,
+        log
       });
 
       if (String(info.categoriaDocumento || '').trim().toUpperCase() === 'DS') {
@@ -1250,21 +1323,9 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
       continue;
     }
 
-    for (let i = 0; i < group.length; i++) {
-      const info = group[i];
-      const row = outputGrid[info.rowIndex] || [];
-
-      if (info.id === decision.keeperId) {
-        row[idxEstado] = 'KEEP';
-        row[idxDetalle] = info.hasDependencias
-          ? 'Conserva el código porque es la única solicitud con hijos o diagramas.'
-          : 'Conserva el código por ser la solicitud más antigua del grupo.';
-        row[idxNuevoCodigo] = info.codigoDocumento;
-        row[idxSolicitud] = info.id;
-        outputGrid[info.rowIndex] = row;
-        skipped++;
-      }
-    }
+    let currentKeeperId = decision.keeperId;
+    let keeperMoved = false;
+    const swappableKeeper = !!group.find((item) => item.id === decision.keeperId && !item.hasDependencias);
 
     for (let i = 0; i < group.length; i++) {
       const info = group[i];
@@ -1274,12 +1335,15 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
 
       const row = outputGrid[info.rowIndex] || [];
       processed++;
+      const rowLabel = `FilaExcel ${info.rowIndex}`;
 
       try {
+        log(`🚀 ${rowLabel} | Aplicando cambio de código a solicitud ${info.id}...`);
         const result = await applyCodigoChange({
           context: params.context,
           webUrl,
           info,
+          rowLabel,
           log
         });
 
@@ -1292,12 +1356,14 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
         row[idxProceso] = result.processFileUrl;
         row[idxAdjunto] = result.attachmentFileName;
         row[idxPasoFallido] = '';
+        row[idxArchivoTemp] = result.trace.tempFileUrl;
         row[idxCodigoRegistroId] = result.trace.codigoRegistroId;
         row[idxCodigoReservado] = result.trace.codigoReservado;
         row[idxAdjuntoRegenerado] = result.trace.adjuntoRegenerado;
         row[idxProcesoReemplazado] = result.trace.procesoReemplazado;
         row[idxSolicitudActualizada] = result.trace.solicitudActualizada;
         row[idxMetadataProcesosActualizada] = result.trace.metadataProcesosActualizada;
+        row[idxRollbackOmitido] = result.trace.rollbackOmitido;
         row[idxRollbackCodigoRegistro] = result.trace.rollbackCodigoRegistro;
         row[idxRollbackAdjunto] = result.trace.rollbackAdjunto;
         row[idxRollbackProceso] = result.trace.rollbackProceso;
@@ -1306,18 +1372,100 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
         outputGrid[info.rowIndex] = row;
         updated++;
       } catch (rowError) {
+        if (!shouldPreserveTempWithoutRollback((rowError as any)?.executionTrace as IExecutionTrace | undefined, rowError)
+          && isPdfConversionFailure(rowError) && swappableKeeper && !keeperMoved && currentKeeperId) {
+          const keeperInfo = group.find((item) => item.id === currentKeeperId);
+          if (keeperInfo) {
+            const keeperRow = outputGrid[keeperInfo.rowIndex] || [];
+            const failedTrace = (rowError as any)?.executionTrace as IExecutionTrace | undefined;
+            const failedMessage = rowError instanceof Error ? rowError.message : String(rowError);
+
+            log(
+              `⚠️ Solicitud ${info.id} | Falló la conversión a PDF. ` +
+              `Se intentará cambiar la solicitud ${keeperInfo.id}, dejando ${info.id} con el código original.`
+            );
+
+            processed++;
+            try {
+              const fallbackLabel = `${rowLabel} | Fallback`;
+              const fallbackResult = await applyCodigoChange({
+                context: params.context,
+                webUrl,
+                info: keeperInfo,
+                rowLabel: fallbackLabel,
+                log
+              });
+
+              keeperMoved = true;
+              currentKeeperId = info.id;
+
+              keeperRow[idxEstado] = 'OK';
+              keeperRow[idxDetalle] = 'Se cambió el código como alternativa porque la otra solicitud duplicada no pudo convertirse a PDF.';
+              keeperRow[idxNuevoCodigo] = fallbackResult.nuevoCodigo;
+              keeperRow[idxSolicitud] = keeperInfo.id;
+              keeperRow[idxProceso] = fallbackResult.processFileUrl;
+              keeperRow[idxAdjunto] = fallbackResult.attachmentFileName;
+              keeperRow[idxPasoFallido] = '';
+              keeperRow[idxArchivoTemp] = fallbackResult.trace.tempFileUrl;
+              keeperRow[idxCodigoRegistroId] = fallbackResult.trace.codigoRegistroId;
+              keeperRow[idxCodigoReservado] = fallbackResult.trace.codigoReservado;
+              keeperRow[idxAdjuntoRegenerado] = fallbackResult.trace.adjuntoRegenerado;
+              keeperRow[idxProcesoReemplazado] = fallbackResult.trace.procesoReemplazado;
+              keeperRow[idxSolicitudActualizada] = fallbackResult.trace.solicitudActualizada;
+              keeperRow[idxMetadataProcesosActualizada] = fallbackResult.trace.metadataProcesosActualizada;
+              keeperRow[idxRollbackOmitido] = fallbackResult.trace.rollbackOmitido;
+              keeperRow[idxRollbackCodigoRegistro] = fallbackResult.trace.rollbackCodigoRegistro;
+              keeperRow[idxRollbackAdjunto] = fallbackResult.trace.rollbackAdjunto;
+              keeperRow[idxRollbackProceso] = fallbackResult.trace.rollbackProceso;
+              keeperRow[idxRollbackSolicitud] = fallbackResult.trace.rollbackSolicitud;
+              keeperRow[idxRollbackMetadataProcesos] = fallbackResult.trace.rollbackMetadataProcesos;
+              outputGrid[keeperInfo.rowIndex] = keeperRow;
+              updated++;
+
+              row[idxEstado] = 'KEEP';
+              row[idxDetalle] = `Conserva el código porque la conversión a PDF falló al intentar cambiar esta solicitud, y se cambió la otra del grupo. Error original: ${failedMessage}`;
+              row[idxNuevoCodigo] = info.codigoDocumento;
+              row[idxSolicitud] = info.id;
+              row[idxPasoFallido] = failedTrace?.pasoFallido || '';
+              row[idxArchivoTemp] = failedTrace?.tempFileUrl || '';
+              row[idxCodigoRegistroId] = failedTrace?.codigoRegistroId || '';
+              row[idxCodigoReservado] = failedTrace?.codigoReservado || 'No';
+              row[idxAdjuntoRegenerado] = failedTrace?.adjuntoRegenerado || 'No';
+              row[idxProcesoReemplazado] = failedTrace?.procesoReemplazado || 'No';
+              row[idxSolicitudActualizada] = failedTrace?.solicitudActualizada || 'No';
+              row[idxMetadataProcesosActualizada] = failedTrace?.metadataProcesosActualizada || 'No';
+              row[idxRollbackOmitido] = failedTrace?.rollbackOmitido || 'No';
+              row[idxRollbackCodigoRegistro] = failedTrace?.rollbackCodigoRegistro || 'No';
+              row[idxRollbackAdjunto] = failedTrace?.rollbackAdjunto || 'No';
+              row[idxRollbackProceso] = failedTrace?.rollbackProceso || 'No';
+              row[idxRollbackSolicitud] = failedTrace?.rollbackSolicitud || 'No';
+              row[idxRollbackMetadataProcesos] = failedTrace?.rollbackMetadataProcesos || 'No';
+              outputGrid[info.rowIndex] = row;
+              skipped++;
+              continue;
+            } catch (fallbackError) {
+              const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+              log(`❌ Solicitud ${keeperInfo.id} | También falló el fallback del grupo: ${fallbackMessage}`);
+            }
+          }
+        }
+
         const message = rowError instanceof Error ? rowError.message : String(rowError);
         const trace = (rowError as any)?.executionTrace as IExecutionTrace | undefined;
         row[idxEstado] = 'ERROR';
-        row[idxDetalle] = message;
+        row[idxDetalle] = shouldPreserveTempWithoutRollback(trace, rowError)
+          ? `No se pudo convertir a PDF. Se conserva el documento generado en TEMP y no se ejecutó rollback. Revisar archivo temporal para gestión manual. Error: ${message}`
+          : message;
         row[idxSolicitud] = info.id;
         row[idxPasoFallido] = trace?.pasoFallido || '';
+        row[idxArchivoTemp] = trace?.tempFileUrl || '';
         row[idxCodigoRegistroId] = trace?.codigoRegistroId || '';
         row[idxCodigoReservado] = trace?.codigoReservado || 'No';
         row[idxAdjuntoRegenerado] = trace?.adjuntoRegenerado || 'No';
         row[idxProcesoReemplazado] = trace?.procesoReemplazado || 'No';
         row[idxSolicitudActualizada] = trace?.solicitudActualizada || 'No';
         row[idxMetadataProcesosActualizada] = trace?.metadataProcesosActualizada || 'No';
+        row[idxRollbackOmitido] = trace?.rollbackOmitido || 'No';
         row[idxRollbackCodigoRegistro] = trace?.rollbackCodigoRegistro || 'No';
         row[idxRollbackAdjunto] = trace?.rollbackAdjunto || 'No';
         row[idxRollbackProceso] = trace?.rollbackProceso || 'No';
@@ -1325,7 +1473,30 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
         row[idxRollbackMetadataProcesos] = trace?.rollbackMetadataProcesos || 'No';
         outputGrid[info.rowIndex] = row;
         error++;
-        log(`❌ Solicitud ${info.id} | ${message}`);
+        log(
+          shouldPreserveTempWithoutRollback(trace, rowError)
+            ? `❌ Solicitud ${info.id} | No se pudo convertir a PDF. Se dejó el documento en TEMP sin rollback | ${trace?.tempFileUrl || ''}`
+            : `❌ Solicitud ${info.id} | ${message}`
+        );
+      }
+    }
+
+    if (currentKeeperId) {
+      const keeperInfo = group.find((item) => item.id === currentKeeperId);
+      if (keeperInfo) {
+        const keeperRow = outputGrid[keeperInfo.rowIndex] || [];
+        if (!String(keeperRow[idxEstado] || '').trim()) {
+          keeperRow[idxEstado] = 'KEEP';
+          keeperRow[idxDetalle] = keeperInfo.hasDependencias
+            ? 'Conserva el código porque es la única solicitud con hijos o diagramas.'
+            : keeperMoved
+              ? 'Conserva el código original porque la otra solicitud del grupo no pudo convertirse a PDF.'
+              : 'Conserva el código por ser la solicitud más antigua del grupo.';
+          keeperRow[idxNuevoCodigo] = keeperInfo.codigoDocumento;
+          keeperRow[idxSolicitud] = keeperInfo.id;
+          outputGrid[keeperInfo.rowIndex] = keeperRow;
+          skipped++;
+        }
       }
     }
   }

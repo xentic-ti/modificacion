@@ -197,6 +197,8 @@ export async function fillAndAttachFromFolder(params: {
   const fechaAprobacionTxt = excelToDDMMYYYY(params.fechaAprobacion);
   const relacionados = params.relacionados || [];
   const diagramas = params.diagramasFlujo || [];
+  const instanciaAprobacionValue = params.instanciaRaw || params.gerenciaAprobadora || '';
+  const gerenciaAprobadoraValue = params.gerenciaAprobadora || params.instanciaRaw || '';
 
   const replacementsWordForDocx: Record<string, any> = {
     TituloDocumento: params.titulo || '',
@@ -207,7 +209,9 @@ export async function fillAndAttachFromFolder(params: {
     CodigoDocumento: params.codigoDocumento || '',
     Resumen: params.resumen || '',
     PuestoRevisor: puestos.filter(Boolean),
-    NombreRevisor: nombres.filter(Boolean)
+    NombreRevisor: nombres.filter(Boolean),
+    InstanciaAprobacion: instanciaAprobacionValue,
+    GerenciaAprobadora: gerenciaAprobadoraValue
   };
 
   const replacementsPlaceholders: Record<string, string> = {
@@ -220,6 +224,8 @@ export async function fillAndAttachFromFolder(params: {
     '{Version}': params.version || '',
     '{CodigoDocumento}': params.codigoDocumento || '',
     '{Resumen}': params.resumen || '',
+    '{InstanciaAprobacion}': instanciaAprobacionValue,
+    '{GerenciaAprobadora}': gerenciaAprobadoraValue,
     '{CodigoDocumentoRelacionado}': relacionados.map((row) => row.codigo || '').filter(Boolean).join('\n'),
     '{NombreDocumentoRelacionado}': relacionados.map((row) => row.nombre || '').filter(Boolean).join('\n'),
     '{EnlaceDocumentoRelacionado}': relacionados.map((row) => row.enlace || '').filter(Boolean).join('\n'),
@@ -227,14 +233,6 @@ export async function fillAndAttachFromFolder(params: {
     '{NombreDiagramaFlujo}': diagramas.map((row) => row.nombre || '').filter(Boolean).join('\n'),
     '{EnlaceDiagramaFlujo}': diagramas.map((row) => row.enlace || '').filter(Boolean).join('\n')
   };
-
-  if (params.esDocumentoApoyo) {
-    replacementsWordForDocx.GerenciaAprobadora = params.gerenciaAprobadora || '';
-    replacementsPlaceholders['{GerenciaAprobadora}'] = params.gerenciaAprobadora || '';
-  } else {
-    replacementsWordForDocx.InstanciaAprobacion = params.instanciaRaw || '';
-    replacementsPlaceholders['{InstanciaAprobacion}'] = params.instanciaRaw || '';
-  }
 
   log(`🧾 ID=${params.itemId} | ${cleanName}`);
   log(`   Tags encontrados en archivo: ${tagsEncontrados.join(', ') || 'NINGUNO'}`);

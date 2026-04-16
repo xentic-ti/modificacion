@@ -32,6 +32,63 @@ function getExcelTargets(zip: ZipLike): string[] {
   return targets;
 }
 
+function applyReplacementMap(value: string, map: Record<string, string>): string {
+  let next = value;
+
+  Object.keys(map || {}).forEach((key) => {
+    if (key && next.indexOf(key) !== -1) {
+      next = next.split(key).join(map[key] || '');
+    }
+  });
+
+  return next;
+}
+
+function mustPreserveSpace(value: string): boolean {
+  return /^\s|\s$/.test(value) || value.indexOf('\n') !== -1 || value.indexOf('\r') !== -1 || /\s{2,}/.test(value);
+}
+
+function writePlainTextElement(doc: XMLDocument, parent: Element, value: string): void {
+  while (parent.firstChild) {
+    parent.removeChild(parent.firstChild);
+  }
+
+  const tNode = doc.createElementNS(XLS_NS, 't');
+  if (mustPreserveSpace(value)) {
+    tNode.setAttribute('xml:space', 'preserve');
+  }
+  tNode.textContent = value;
+  parent.appendChild(tNode);
+}
+
+function replaceGroupedTextNodes(
+  doc: XMLDocument,
+  parentTagName: 'si' | 'is',
+  map: Record<string, string>
+): boolean {
+  const parents = Array.from(doc.getElementsByTagNameNS(XLS_NS, parentTagName));
+  let changed = false;
+
+  for (let i = 0; i < parents.length; i++) {
+    const parent = parents[i];
+    const tNodes = Array.from(parent.getElementsByTagNameNS(XLS_NS, 't'));
+    if (!tNodes.length) {
+      continue;
+    }
+
+    const original = tNodes.map((node) => node.textContent || '').join('');
+    const next = applyReplacementMap(original, map);
+    if (next === original) {
+      continue;
+    }
+
+    writePlainTextElement(doc, parent, next);
+    changed = true;
+  }
+
+  return changed;
+}
+
 function replaceTextNodesInSpreadsheetXml(xml: string, map: Record<string, string>): string {
   const parser = new DOMParser();
   const doc = parser.parseFromString(xml, 'application/xml');
@@ -40,22 +97,24 @@ function replaceTextNodesInSpreadsheetXml(xml: string, map: Record<string, strin
     return xml;
   }
 
-  const tNodes = Array.from(doc.getElementsByTagNameNS(XLS_NS, 't'));
   let changed = false;
+  changed = replaceGroupedTextNodes(doc, 'si', map) || changed;
+  changed = replaceGroupedTextNodes(doc, 'is', map) || changed;
+
+  const tNodes = Array.from(doc.getElementsByTagNameNS(XLS_NS, 't'));
 
   for (let i = 0; i < tNodes.length; i++) {
     const node = tNodes[i];
     const original = node.textContent || '';
-    let next = original;
-
-    Object.keys(map || {}).forEach((key) => {
-      if (key && next.indexOf(key) !== -1) {
-        next = next.split(key).join(map[key] || '');
-      }
-    });
+    const next = applyReplacementMap(original, map);
 
     if (next !== original) {
       node.textContent = next;
+      if (mustPreserveSpace(next)) {
+        node.setAttribute('xml:space', 'preserve');
+      } else {
+        node.removeAttribute('xml:space');
+      }
       changed = true;
     }
   }
