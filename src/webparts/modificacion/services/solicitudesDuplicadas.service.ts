@@ -38,6 +38,11 @@ interface IRelacionDocumentoItem {
   DocumentoHijoId?: number;
 }
 
+interface IDiagramaFlujoItem {
+  Id: number;
+  SolicitudId?: number;
+}
+
 export async function buscarSolicitudesDuplicadas(params: {
   context: WebPartContext;
   log?: LogFn;
@@ -60,8 +65,12 @@ export async function buscarSolicitudesDuplicadas(params: {
   const relaciones = await obtenerRelaciones(params.context, webUrl);
   log(`🔗 Relaciones leidas: ${relaciones.length}`);
 
+  log('🔎 Consultando Diagramas de Flujo para armar IDs por solicitud...');
+  const diagramas = await obtenerDiagramasFlujo(params.context, webUrl);
+  log(`📈 Diagramas leidos: ${diagramas.length}`);
+
   const grouped = new Map<string, ISolicitudItem[]>();
-  const relationMaps = buildRelationMaps(relaciones);
+  const relationMaps = buildRelationMaps(relaciones, diagramas);
 
   for (let i = 0; i < solicitudes.length; i++) {
     const item = solicitudes[i];
@@ -87,8 +96,8 @@ export async function buscarSolicitudesDuplicadas(params: {
       return;
     }
 
-    const distinctTitles = buildDistinctTitles(items);
-    if (distinctTitles.length < 2) {
+    const distinctNames = buildDistinctNames(items);
+    if (distinctNames.length < 2) {
       return;
     }
 
@@ -102,7 +111,7 @@ export async function buscarSolicitudesDuplicadas(params: {
         nonCurrentRows++;
       }
 
-      duplicateRows.push(buildReportRow(item, sortedItems.length, distinctTitles.length, relationMaps));
+      duplicateRows.push(buildReportRow(item, sortedItems.length, distinctNames.length, relationMaps));
     }
   });
 
@@ -113,7 +122,7 @@ export async function buscarSolicitudesDuplicadas(params: {
     log(`⚠️ Solicitudes duplicadas detectadas: ${duplicateRows.length}`);
     log(`ℹ️ Solicitudes no vigentes dentro de duplicados: ${nonCurrentRows}`);
   } else {
-    log('✅ No se encontraron solicitudes con CodigoDocumento duplicado y titulos distintos.');
+    log('✅ No se encontraron solicitudes con CodigoDocumento duplicado y nombres distintos.');
   }
 
   const report = buildSolicitudesDuplicadasWorkbook(duplicateRows);
@@ -149,6 +158,15 @@ async function obtenerRelaciones(context: WebPartContext, webUrl: string): Promi
   return getAllItems<IRelacionDocumentoItem>(context, url);
 }
 
+async function obtenerDiagramasFlujo(context: WebPartContext, webUrl: string): Promise<IDiagramaFlujoItem[]> {
+  const url =
+    `${webUrl}/_api/web/lists/getbytitle('Diagramas de Flujo')/items` +
+    `?$select=Id,SolicitudId` +
+    `&$top=5000`;
+
+  return getAllItems<IDiagramaFlujoItem>(context, url);
+}
+
 function buildDuplicateKey(item: ISolicitudItem): string {
   return normalizeKeyPart(item.CodigoDocumento);
 }
@@ -157,28 +175,33 @@ function normalizeKeyPart(value: any): string {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
-function buildDistinctTitles(items: ISolicitudItem[]): string[] {
+function buildDistinctNames(items: ISolicitudItem[]): string[] {
   const map = new Map<string, string>();
 
   for (let i = 0; i < items.length; i++) {
-    const title = String(items[i].Title || '').trim();
-    const key = normalizeKeyPart(title);
+    const name = getSolicitudName(items[i]);
+    const key = normalizeKeyPart(name);
     if (!key || map.has(key)) {
       continue;
     }
 
-    map.set(key, title);
+    map.set(key, name);
   }
 
   return Array.from(map.values());
 }
 
-function buildRelationMaps(relaciones: IRelacionDocumentoItem[]): {
+function buildRelationMaps(
+  relaciones: IRelacionDocumentoItem[],
+  diagramas: IDiagramaFlujoItem[]
+): {
   parentIdsByChildId: Map<number, number[]>;
   childIdsByParentId: Map<number, number[]>;
+  diagramIdsBySolicitudId: Map<number, number[]>;
 } {
   const parentIdsByChildId = new Map<number, number[]>();
   const childIdsByParentId = new Map<number, number[]>();
+  const diagramIdsBySolicitudId = new Map<number, number[]>();
 
   for (let i = 0; i < relaciones.length; i++) {
     const relacion = relaciones[i];
@@ -191,12 +214,23 @@ function buildRelationMaps(relaciones: IRelacionDocumentoItem[]): {
     }
   }
 
+  for (let i = 0; i < diagramas.length; i++) {
+    const diagramaId = Number(diagramas[i].Id || 0);
+    const solicitudId = Number(diagramas[i].SolicitudId || 0);
+
+    if (diagramaId && solicitudId) {
+      pushUniqueNumber(diagramIdsBySolicitudId, solicitudId, diagramaId);
+    }
+  }
+
   sortMapValues(parentIdsByChildId);
   sortMapValues(childIdsByParentId);
+  sortMapValues(diagramIdsBySolicitudId);
 
   return {
     parentIdsByChildId,
-    childIdsByParentId
+    childIdsByParentId,
+    diagramIdsBySolicitudId
   };
 }
 
@@ -219,6 +253,10 @@ function formatIdList(values: number[]): string {
   return values.length ? values.join(' | ') : '';
 }
 
+function formatSlashIdList(values: number[]): string {
+  return values.length ? values.join('/') : '';
+}
+
 function buildReportRow(
   item: ISolicitudItem,
   totalCoincidencias: number,
@@ -226,6 +264,7 @@ function buildReportRow(
   relationMaps: {
     parentIdsByChildId: Map<number, number[]>;
     childIdsByParentId: Map<number, number[]>;
+    diagramIdsBySolicitudId: Map<number, number[]>;
   }
 ): ISolicitudDuplicadaReportRow {
   const itemId = Number(item.Id || 0);
@@ -245,13 +284,18 @@ function buildReportRow(
     CreadoPor: String(item.Author?.Title || '').trim(),
     CreadoPorEmail: String(item.Author?.EMail || '').trim(),
     DocumentosPadreIds: formatIdList(relationMaps.parentIdsByChildId.get(itemId) || []),
-    DocumentosHijosIds: formatIdList(relationMaps.childIdsByParentId.get(itemId) || []),
+    DocumentosHijosIds: formatSlashIdList(relationMaps.childIdsByParentId.get(itemId) || []),
+    DiagramasFlujoIds: formatSlashIdList(relationMaps.diagramIdsBySolicitudId.get(itemId) || []),
     FechaDeAprobacionSolicitud: String(item.FechaDeAprobacionSolicitud || '').trim(),
     FechadeVigencia: String(item.FechadeVigencia || '').trim(),
     FechaDePublicacionSolicitud: String(item.FechaDePublicacionSolicitud || '').trim(),
     Created: String(item.Created || '').trim(),
     Modified: String(item.Modified || '').trim()
   };
+}
+
+function getSolicitudName(item: ISolicitudItem): string {
+  return String(item.NombreDocumento || item.Title || '').trim();
 }
 
 function formatBooleanField(value: any): string {
@@ -281,9 +325,9 @@ function compareReportRows(a: ISolicitudDuplicadaReportRow, b: ISolicitudDuplica
     return byDocument;
   }
 
-  const byTitle = String(a.Title || '').localeCompare(String(b.Title || ''), 'es', { sensitivity: 'base' });
-  if (byTitle !== 0) {
-    return byTitle;
+  const byName = String(a.NombreDocumento || a.Title || '').localeCompare(String(b.NombreDocumento || b.Title || ''), 'es', { sensitivity: 'base' });
+  if (byName !== 0) {
+    return byName;
   }
 
   const byVersion = String(a.VersionDocumento || '').localeCompare(String(b.VersionDocumento || ''), 'es', { sensitivity: 'base' });

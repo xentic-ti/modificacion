@@ -240,7 +240,7 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
   const ejecutarReporteSolicitudesDuplicadas = React.useCallback(async (): Promise<void> => {
     setError(null);
     setIsRunning(true);
-    setLogRevision('Iniciando reporte de solicitudes con CodigoDocumento duplicado y distinto titulo...');
+    setLogRevision('Iniciando reporte de solicitudes con CodigoDocumento duplicado y distinto nombre...');
 
     try {
       const resultado = await buscarSolicitudesDuplicadas({
@@ -250,7 +250,7 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
 
       descargarArchivo(resultado.blob, resultado.fileName);
       appendLog(`✅ Reporte generado. Total solicitudes leidas: ${resultado.totalSolicitudes}`);
-      appendLog(`⚠️ Grupos duplicados con distinto titulo: ${resultado.duplicatedGroups}`);
+      appendLog(`⚠️ Grupos duplicados con distinto nombre: ${resultado.duplicatedGroups}`);
       appendLog(`⚠️ Filas incluidas en Excel: ${resultado.duplicatedRows}`);
       appendLog(`ℹ️ Filas no vigentes dentro del reporte: ${resultado.nonCurrentRows}`);
       appendLog(`📥 Archivo generado: ${resultado.fileName}`);

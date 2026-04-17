@@ -19,6 +19,7 @@ export interface ISolicitudDuplicadaReportRow {
   CreadoPorEmail: string;
   DocumentosPadreIds: string;
   DocumentosHijosIds: string;
+  DiagramasFlujoIds: string;
   FechaDeAprobacionSolicitud: string;
   FechadeVigencia: string;
   FechaDePublicacionSolicitud: string;
@@ -43,6 +44,7 @@ const headers = [
   'CreadoPorEmail',
   'DocumentosPadreIds',
   'DocumentosHijosIds',
+  'DiagramasFlujoIds',
   'FechaDeAprobacionSolicitud',
   'FechadeVigencia',
   'FechaDePublicacionSolicitud',
