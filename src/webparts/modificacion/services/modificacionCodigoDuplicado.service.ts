@@ -80,6 +80,15 @@ type IExecutionTrace = {
   rollbackMetadataProcesos: string;
 };
 
+type IApplyCodigoResult = {
+  attachmentFileName: string;
+  processFileUrl: string;
+  tempFileUrl: string;
+  nuevoCodigo: string;
+  codigoRegistroId: number;
+  trace: IExecutionTrace;
+};
+
 function normalizeHeader(value: any): string {
   return String(value ?? '')
     .normalize('NFD')
@@ -1045,6 +1054,25 @@ function shouldPreserveTempWithoutRollback(trace: IExecutionTrace | undefined, e
   return !!trace?.tempFileUrl && isPdfConversionFailure(error);
 }
 
+function createEmptyExecutionTrace(): IExecutionTrace {
+  return {
+    pasoFallido: '',
+    codigoRegistroId: '',
+    codigoReservado: 'No',
+    adjuntoRegenerado: 'No',
+    procesoReemplazado: 'No',
+    solicitudActualizada: 'No',
+    metadataProcesosActualizada: 'No',
+    tempFileUrl: '',
+    rollbackOmitido: 'No',
+    rollbackCodigoRegistro: 'No',
+    rollbackAdjunto: 'No',
+    rollbackProceso: 'No',
+    rollbackSolicitud: 'No',
+    rollbackMetadataProcesos: 'No'
+  };
+}
+
 async function enrichRowInfo(params: {
   context: WebPartContext;
   webUrl: string;
@@ -1114,7 +1142,7 @@ async function applyCodigoChange(params: {
   info: ISolicitudRuntimeInfo;
   rowLabel?: string;
   log?: LogFn;
-}): Promise<{ attachmentFileName: string; processFileUrl: string; tempFileUrl: string; nuevoCodigo: string; codigoRegistroId: number; trace: IExecutionTrace; }> {
+}): Promise<IApplyCodigoResult> {
   const log = params.log || (() => undefined);
   const rowLabel = params.rowLabel || `Fila ${params.info.rowIndex}`;
   const solicitudId = params.info.id;
@@ -1158,22 +1186,7 @@ async function applyCodigoChange(params: {
   let diagramasParaDocumento = params.info.diagramas.map((item) => ({ ...item }));
   const diagramRollbackEntries: Array<{ itemId: number; oldCodigo: string; }> = [];
   const diagramCodigoRegistroIds: number[] = [];
-  const trace: IExecutionTrace = {
-    pasoFallido: '',
-    codigoRegistroId: '',
-    codigoReservado: 'No',
-    adjuntoRegenerado: 'No',
-    procesoReemplazado: 'No',
-    solicitudActualizada: 'No',
-    metadataProcesosActualizada: 'No',
-    tempFileUrl: '',
-    rollbackOmitido: 'No',
-    rollbackCodigoRegistro: 'No',
-    rollbackAdjunto: 'No',
-    rollbackProceso: 'No',
-    rollbackSolicitud: 'No',
-    rollbackMetadataProcesos: 'No'
-  };
+  const trace: IExecutionTrace = createEmptyExecutionTrace();
 
   try {
     trace.pasoFallido = 'ReservarCodigo';
@@ -1387,125 +1400,223 @@ async function applyCodigoChange(params: {
   }
 }
 
+async function applyRenovarSolicitudConHijos(params: {
+  context: WebPartContext;
+  webUrl: string;
+  info: ISolicitudRuntimeInfo;
+  rowLabel?: string;
+  log?: LogFn;
+}): Promise<IApplyCodigoResult> {
+  const log = params.log || (() => undefined);
+  const rowLabel = params.rowLabel || `Fila ${params.info.rowIndex}`;
+  const solicitud = params.info.solicitud;
+  const solicitudId = params.info.id;
+  const processFile = params.info.processFile;
+  const attachment = params.info.attachment;
+  const trace = createEmptyExecutionTrace();
+  let processBlobOriginal: Blob | null = null;
+  let processMetadataOriginal: any = null;
+  let tempFileUrl = '';
+  let solicitudWasUpdated = false;
+  let processWasUpdated = false;
+  let metadataWasUpdated = false;
+
+  if (!solicitud?.Id) {
+    throw new Error(`No se encontró la solicitud ${solicitudId}.`);
+  }
+
+  if (!processFile?.FileRef) {
+    throw new Error(`La solicitud ${solicitudId} no tiene archivo vigente en Procesos.`);
+  }
+
+  try {
+    trace.pasoFallido = 'RespaldarProcesoActual';
+    processBlobOriginal = await downloadBlobByServerRelativeUrl(params.webUrl, processFile.FileRef);
+    processMetadataOriginal = await getFileItemMetadata(params.context, params.webUrl, processFile.FileRef);
+
+    trace.pasoFallido = 'BuscarArchivoRenovar';
+    log(`📚 ${rowLabel} | Renovar con hijos: buscando documento existente para republicar...`);
+    const historico = await getHistoricoFileForRenew(
+      params.context,
+      params.webUrl,
+      solicitud,
+      attachment?.FileName,
+      log
+    );
+    const sourceFileUrl = historico?.FileRef || attachment?.ServerRelativeUrl || processFile.FileRef;
+    const sourceFileName = historico?.FileLeafRef || attachment?.FileName || processFile.FileLeafRef || '';
+
+    if (!sourceFileUrl) {
+      throw new Error(`No se encontró un archivo fuente para republicar la solicitud ${solicitudId}.`);
+    }
+
+    const sourceMetadata = historico?.FileRef
+      ? await getFileItemMetadata(params.context, params.webUrl, historico.FileRef)
+      : processMetadataOriginal;
+    const tempFolder = joinFolder(TEMP_WORD_ROOT, getRelativeFolderWithinProcesos(processFile.FileRef));
+    const tempFileName = `${solicitudId}_renovar_${Date.now()}_${sourceFileName || 'documento'}`;
+    const tempFileDestination = joinFolder(tempFolder, tempFileName);
+
+    trace.pasoFallido = 'CopiarFuenteATemp';
+    await copyFileByPath(params.context, params.webUrl, sourceFileUrl, tempFileDestination, true);
+    tempFileUrl = tempFileDestination;
+    trace.tempFileUrl = tempFileUrl;
+    log(`📄 ${rowLabel} | Documento copiado a TEMP para republicación | ${tempFileName}`);
+
+    if (!solicitud?.EsVersionActualDocumento) {
+      trace.pasoFallido = 'ActualizarSolicitud';
+      log(`📝 ${rowLabel} | Renovar con hijos: marcando solicitud como versión actual...`);
+      await updateListItem(params.context, params.webUrl, 'Solicitudes', solicitudId, {
+        EsVersionActualDocumento: true
+      });
+      solicitudWasUpdated = true;
+      trace.solicitudActualizada = 'Si';
+      params.info.solicitud = {
+        ...solicitud,
+        EsVersionActualDocumento: true
+      };
+      log(`📝 ${rowLabel} | Solicitud ${solicitudId} marcada como versión actual.`);
+    }
+
+    trace.pasoFallido = 'ReemplazarProceso';
+    log(`📚 ${rowLabel} | Renovar con hijos: republicando archivo existente en Procesos sin regenerar...`);
+    await publishReplacementToProcesos({
+      context: params.context,
+      webUrl: params.webUrl,
+      tempFileUrl,
+      targetProcessFileUrl: processFile.FileRef,
+      log
+    });
+    processWasUpdated = true;
+    trace.procesoReemplazado = 'Si';
+
+    trace.pasoFallido = 'ActualizarMetadataProcesos';
+    log(`🗂️ ${rowLabel} | Renovar con hijos: actualizando metadata en Procesos sin cambiar código...`);
+    await updateProcesosMetadataForRenew({
+      context: params.context,
+      webUrl: params.webUrl,
+      targetFileUrl: processFile.FileRef,
+      solicitud: params.info.solicitud,
+      baseMetadata: sourceMetadata
+    });
+    metadataWasUpdated = true;
+    trace.metadataProcesosActualizada = 'Si';
+    trace.pasoFallido = '';
+    log(`✅ ${rowLabel} | Renovar con hijos completado sin regenerar documento ni cambiar código.`);
+
+    return {
+      attachmentFileName: attachment?.FileName || sourceFileName,
+      processFileUrl: processFile.FileRef,
+      tempFileUrl,
+      nuevoCodigo: String(params.info.codigoDocumento || solicitud?.CodigoDocumento || '').trim(),
+      codigoRegistroId: 0,
+      trace
+    };
+  } catch (error) {
+    if (shouldPreserveTempWithoutRollback(trace, error)) {
+      trace.rollbackOmitido = 'Si';
+      (error as any).executionTrace = trace;
+      throw error;
+    }
+
+    if (metadataWasUpdated) {
+      try {
+        await updateFileMetadataByPath(params.context, params.webUrl, processFile.FileRef, {
+          Clasificaciondeproceso: processMetadataOriginal?.Clasificaciondeproceso || '',
+          AreaDuena: processMetadataOriginal?.AreaDuena || '',
+          VersionDocumento: processMetadataOriginal?.VersionDocumento || '',
+          AreaImpactada: processMetadataOriginal?.AreaImpactada || [],
+          Macroproceso: processMetadataOriginal?.Macroproceso || '',
+          Proceso: processMetadataOriginal?.Proceso || '',
+          Subproceso: processMetadataOriginal?.Subproceso || '',
+          Tipodedocumento: processMetadataOriginal?.Tipodedocumento || '',
+          SolicitudId: Number(processMetadataOriginal?.SolicitudId || 0) || null,
+          Codigodedocumento: processMetadataOriginal?.Codigodedocumento || '',
+          Resumen: processMetadataOriginal?.Resumen || '',
+          CategoriaDocumento: processMetadataOriginal?.CategoriaDocumento || '',
+          FechaDeAprobacion: processMetadataOriginal?.FechaDeAprobacion || null,
+          FechaDeVigencia: processMetadataOriginal?.FechaDeVigencia || null,
+          InstanciaDeAprobacionId: Number(processMetadataOriginal?.InstanciaDeAprobacionId || 0) || null,
+          Accion: processMetadataOriginal?.Accion || '',
+          NombreDocumento: processMetadataOriginal?.NombreDocumento || ''
+        });
+        trace.rollbackMetadataProcesos = 'Si';
+      } catch (_rollbackError) {
+        // sin acción
+      }
+    }
+
+    if (processWasUpdated && processBlobOriginal) {
+      try {
+        const target = splitFolderAndFile(processFile.FileRef);
+        await uploadFileToFolder(params.context, params.webUrl, target.folder, target.fileName, processBlobOriginal);
+        trace.rollbackProceso = 'Si';
+      } catch (_rollbackError) {
+        // sin acción
+      }
+    }
+
+    if (solicitudWasUpdated) {
+      try {
+        await updateListItem(params.context, params.webUrl, 'Solicitudes', solicitudId, {
+          EsVersionActualDocumento: Boolean(solicitud?.EsVersionActualDocumento)
+        });
+        trace.rollbackSolicitud = 'Si';
+      } catch (_rollbackError) {
+        // sin acción
+      }
+    }
+
+    (error as any).executionTrace = trace;
+    throw error;
+  }
+}
+
 async function applyRenovarSolicitud(params: {
   context: WebPartContext;
   webUrl: string;
   info: ISolicitudRuntimeInfo;
   rowLabel?: string;
   log?: LogFn;
-}): Promise<{ attachmentFileName: string; processFileUrl: string; tempFileUrl: string; trace: IExecutionTrace; }> {
+}): Promise<IApplyCodigoResult> {
   const log = params.log || (() => undefined);
   const rowLabel = params.rowLabel || `Fila ${params.info.rowIndex}`;
   const solicitud = params.info.solicitud;
   const solicitudId = params.info.id;
-  const attachment = params.info.attachment;
 
   if (!solicitud?.Id) {
     throw new Error(`No se encontró la solicitud ${solicitudId}.`);
   }
 
-  if (!attachment?.ServerRelativeUrl || !attachment?.FileName) {
-    throw new Error(`La solicitud ${solicitudId} no tiene adjunto compatible para renovar.`);
-  }
-
-  const historicoFile = await getHistoricoFileForRenew(
-    params.context,
-    params.webUrl,
-    solicitud,
-    attachment.FileName,
-    log
-  );
-  if (!historicoFile?.FileRef) {
-    throw new Error(`No se encontró archivo en históricos para la solicitud ${solicitudId}.`);
-  }
-
-  const historicoMetadata = await getFileItemMetadata(params.context, params.webUrl, historicoFile.FileRef);
-  const relativeFolder = getRelativeFolderWithinHistoricos(historicoFile.FileRef);
-  const targetFolder = joinFolder(PROCESOS_ROOT, relativeFolder);
-  const restoredHistoricalName = removeHistoricalSuffix(historicoFile.FileLeafRef);
-  const outputFileName = /\.docx$/i.test(attachment.FileName)
-    ? replaceExtension(restoredHistoricalName || attachment.FileName, '.pdf')
-    : (restoredHistoricalName || attachment.FileName);
-  const processFileUrl = `${targetFolder}/${outputFileName}`;
-  const tempDestino = joinFolder(TEMP_WORD_ROOT, relativeFolder);
-  const attachmentBlob = await downloadBlobByServerRelativeUrl(params.webUrl, attachment.ServerRelativeUrl);
-  const tempFileUrl = await uploadFileToFolder(
-    params.context,
-    params.webUrl,
-    tempDestino,
-    attachment.FileName,
-    attachmentBlob
-  );
-
-  const trace: IExecutionTrace = {
-    pasoFallido: '',
-    codigoRegistroId: '',
-    codigoReservado: 'No',
-    adjuntoRegenerado: 'No',
-    procesoReemplazado: 'No',
-    solicitudActualizada: 'No',
-    metadataProcesosActualizada: 'No',
-    tempFileUrl,
-    rollbackOmitido: 'No',
-    rollbackCodigoRegistro: 'No',
-    rollbackAdjunto: 'No',
-    rollbackProceso: 'No',
-    rollbackSolicitud: 'No',
-    rollbackMetadataProcesos: 'No'
-  };
-
-  log(`📂 ${rowLabel} | Archivo renovado copiado a TEMP | ${tempFileUrl}`);
-
-  trace.pasoFallido = 'ActualizarSolicitud';
-  await updateListItem(params.context, params.webUrl, 'Solicitudes', solicitudId, {
-    EsVersionActualDocumento: true
-  });
-  trace.solicitudActualizada = 'Si';
-  log(`📝 ${rowLabel} | Solicitud ${solicitudId} marcada como versión actual.`);
-
-  try {
-    trace.pasoFallido = 'ReemplazarProceso';
-    log(`📚 ${rowLabel} | Publicando documento renovado en Procesos...`);
-    await publishReplacementToProcesos({
+  if (params.info.childIds.length > 0) {
+    return applyRenovarSolicitudConHijos({
       context: params.context,
       webUrl: params.webUrl,
-      tempFileUrl,
-      targetProcessFileUrl: processFileUrl,
+      info: params.info,
+      rowLabel,
       log
     });
-    trace.procesoReemplazado = 'Si';
-
-    trace.pasoFallido = 'ActualizarMetadataProcesos';
-    await updateProcesosMetadataForRenew({
-      context: params.context,
-      webUrl: params.webUrl,
-      targetFileUrl: processFileUrl,
-      solicitud,
-      baseMetadata: historicoMetadata
-    });
-    trace.metadataProcesosActualizada = 'Si';
-    log(`🗂️ ${rowLabel} | Metadata de Procesos actualizada para renovación.`);
-
-    trace.pasoFallido = 'EliminarHistorico';
-    await recycleFile(params.context, params.webUrl, historicoFile.FileRef);
-    trace.pasoFallido = '';
-    log(`🗑️ ${rowLabel} | Histórico eliminado | ${historicoFile.FileRef}`);
-
-    return {
-      attachmentFileName: attachment.FileName,
-      processFileUrl,
-      tempFileUrl,
-      trace
-    };
-  } catch (error) {
-    if (shouldPreserveTempWithoutRollback(trace, error)) {
-      trace.rollbackOmitido = 'Si';
-      log(`⚠️ ${rowLabel} | Falló la conversión a PDF en renovación. Se conserva el archivo en TEMP y no se ejecuta rollback.`);
-    }
-
-    (error as any).executionTrace = trace;
-    throw error;
   }
+
+  if (!solicitud?.EsVersionActualDocumento) {
+    log(`ℹ️ ${rowLabel} | La solicitud ${solicitudId} no está vigente. Se marcará como versión actual antes de cambiar el código.`);
+    await updateListItem(params.context, params.webUrl, 'Solicitudes', solicitudId, {
+      EsVersionActualDocumento: true
+    });
+    params.info.solicitud = {
+      ...solicitud,
+      EsVersionActualDocumento: true
+    };
+    log(`📝 ${rowLabel} | Solicitud ${solicitudId} marcada como versión actual.`);
+  }
+
+  return applyCodigoChange({
+    context: params.context,
+    webUrl: params.webUrl,
+    info: params.info,
+    rowLabel,
+    log
+  });
 }
 
 function buildOutputFileName(originalFileName: string): string {
@@ -1715,7 +1826,11 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
 
         row[idxEstado] = 'OK';
         row[idxDetalle] = inputRows[i].procesarMode === 'renovar'
-          ? 'Se renovó la solicitud: se marcó como versión actual, se publicó nuevamente en Procesos y se eliminó el histórico asociado.'
+          ? info.childIds.length > 0
+            ? 'Se aseguró la solicitud como versión actual y se republicó el documento existente en Procesos con su metadata, sin regenerar ni cambiar código.'
+            : info.diagramas.length
+              ? 'Se aseguró la solicitud como versión actual y se cambió el código del documento junto con los códigos de sus diagramas de flujo asociados.'
+              : 'Se aseguró la solicitud como versión actual y se cambió el código del documento seleccionado.'
           : info.diagramas.length
             ? 'Se cambió el código del documento y también los códigos de sus diagramas de flujo asociados.'
             : 'Se cambió el código del documento seleccionado.';
