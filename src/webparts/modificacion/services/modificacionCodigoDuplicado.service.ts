@@ -1656,9 +1656,9 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
       continue;
     }
 
-    if (!isVersionUno(inputRows[i].versionDocumento)) {
+    if (inputRows[i].procesarMode === 'renovar' && !isVersionUno(inputRows[i].versionDocumento)) {
       row[idxEstado] = 'SKIP';
-      row[idxDetalle] = `La versión ${inputRows[i].versionDocumento || '(vacía)'} no es 1.0.`;
+      row[idxDetalle] = `La versión ${inputRows[i].versionDocumento || '(vacía)'} no es 1.0 para Renovar.`;
       outputGrid[inputRows[i].rowIndex] = row;
       skipped++;
       continue;
