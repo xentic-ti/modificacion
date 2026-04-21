@@ -13,6 +13,7 @@ import {
   escapeODataValue,
   getAllItems,
   getAttachmentFiles,
+  recycleFile,
   spGetJson,
   spPostJson,
   updateListItem,
@@ -25,6 +26,7 @@ type IRelacionadoRow = { solicitudId: number; codigo: string; nombre: string; en
 type IDiagramaRow = { id: number; codigo: string; nombre: string; enlace: string; };
 
 const PROCESOS_ROOT = '/sites/SistemadeGestionDocumental/Procesos';
+const HISTORICOS_ROOT = '/sites/SistemadeGestionDocumental/Documentos Histricos';
 const TEMP_WORD_ROOT = '/sites/SistemadeGestionDocumental/Procesos/TEMP_MIGRACION_WORD';
 const CODIGOS_DOCUMENTOS_LIST = 'Códigos Documentos';
 
@@ -37,6 +39,9 @@ type IInputRow = {
   title: string;
   nombreDocumento: string;
   created: string;
+  procesar: boolean;
+  procesarRaw: string;
+  procesarMode: 'si' | 'renovar' | '';
 };
 
 type ISolicitudRuntimeInfo = {
@@ -47,6 +52,7 @@ type ISolicitudRuntimeInfo = {
   created: string;
   title: string;
   nombreDocumento: string;
+  procesar: boolean;
   categoriaDocumento: string;
   solicitud: any;
   childIds: number[];
@@ -79,15 +85,6 @@ function normalizeHeader(value: any): string {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, '')
-    .trim()
-    .toLowerCase();
-}
-
-function normKey(value: any): string {
-  return String(value ?? '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
 }
@@ -125,6 +122,32 @@ function splitFolderAndFile(fileUrl: string): { folder: string; fileName: string
   };
 }
 
+function replaceExtension(name: string, extensionWithDot: string): string {
+  const clean = String(name || '').trim();
+  if (!clean) return clean;
+  return clean.replace(/\.[^.]+$/, '') + extensionWithDot;
+}
+
+function getRelativeFolderWithinHistoricos(fileUrl: string): string {
+  const full = trimSlash(fileUrl);
+  const root = trimSlash(HISTORICOS_ROOT);
+  const fileDir = full.substring(0, full.lastIndexOf('/'));
+  return fileDir.indexOf(root) === 0 ? fileDir.substring(root.length).replace(/^\/+/, '') : '';
+}
+
+function removeHistoricalSuffix(fileName: string): string {
+  const clean = String(fileName || '').trim();
+  const extension = (clean.match(/\.[^.]+$/) || [''])[0];
+  const baseName = extension ? clean.slice(0, -extension.length) : clean;
+  const normalizedBase = baseName
+    .replace(/_V[^_]+_\d{8}$/i, '')
+    .replace(/\s+v\d+(?:\.\d+)?\s+\d{8}$/i, '')
+    .replace(/\s+v\d+(?:\.\d+)?[_-]\d{8}$/i, '')
+    .replace(/[_-]v\d+(?:\.\d+)?[_-]?\d{8}$/i, '')
+    .trim();
+  return `${normalizedBase}${extension}`;
+}
+
 function getRelativeFolderWithinProcesos(fileUrl: string): string {
   const full = trimSlash(fileUrl);
   const root = trimSlash(PROCESOS_ROOT);
@@ -136,25 +159,19 @@ function isVersionUno(value: any): boolean {
   return String(value || '').trim() === '1.0';
 }
 
-function parseDateSafe(value: any): number {
-  const text = String(value || '').trim();
-  if (!text) {
-    return 0;
-  }
+function isProcesarSi(value: any): boolean {
+  return getProcesarMode(value) === 'si';
+}
 
-  const ddmmyyyy = text.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
-  if (ddmmyyyy) {
-    const day = Number(ddmmyyyy[1]);
-    const month = Number(ddmmyyyy[2]) - 1;
-    const year = Number(ddmmyyyy[3].length === 2 ? `20${ddmmyyyy[3]}` : ddmmyyyy[3]);
-    const hour = Number(ddmmyyyy[4] || 0);
-    const minute = Number(ddmmyyyy[5] || 0);
-    const second = Number(ddmmyyyy[6] || 0);
-    return new Date(year, month, day, hour, minute, second).getTime() || 0;
-  }
-
-  const iso = Date.parse(text);
-  return Number.isFinite(iso) ? iso : 0;
+function getProcesarMode(value: any): 'si' | 'renovar' | '' {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (normalized === 'si') return 'si';
+  if (normalized === 'renovar') return 'renovar';
+  return '';
 }
 
 function obtenerPrimerNombreYApellido(displayName: string): string {
@@ -224,10 +241,11 @@ async function getFieldInternalName(
 async function getSolicitudById(context: WebPartContext, webUrl: string, solicitudId: number): Promise<any> {
   const url =
     `${webUrl}/_api/web/lists/getbytitle('Solicitudes')/items(${solicitudId})` +
-    `?$select=Id,Title,NombreDocumento,CodigoDocumento,ResumenDocumento,VersionDocumento,TipoDocumentoId,ProcesoDeNegocioId,` +
-    `FechaDeAprobacionSolicitud,FechadeVigencia,AreaDuenaId,Instanciasdeaprobacion/Title,` +
+    `?$select=Id,Title,NombreDocumento,CodigoDocumento,CategoriadeDocumento,ResumenDocumento,VersionDocumento,TipoDocumentoId,TipoDocumento/Title,ProcesoDeNegocioId,` +
+    `ProcesoDeNegocio/Title,ProcesoDeNegocio/field_1,ProcesoDeNegocio/field_2,ProcesoDeNegocio/field_3,` +
+    `FechaDeAprobacionSolicitud,FechadeVigencia,AreaDuenaId,InstanciasdeaprobacionId,Instanciasdeaprobacion/Title,` +
     `AreasImpactadas/Id,AreasImpactadas/Title,EsVersionActualDocumento` +
-    `&$expand=Instanciasdeaprobacion,AreasImpactadas`;
+    `&$expand=TipoDocumento,ProcesoDeNegocio,Instanciasdeaprobacion,AreasImpactadas`;
   return spGetJson<any>(context, url);
 }
 
@@ -348,7 +366,7 @@ async function getDiagramasFlujoRowsBySolicitud(
 async function getFileItemMetadata(context: WebPartContext, webUrl: string, fileUrl: string): Promise<any> {
   return spGetJson<any>(
     context,
-    `${webUrl}/_api/web/GetFileByServerRelativePath(decodedurl='${escapeODataValue(fileUrl)}')/ListItemAllFields?$select=Id,Codigodedocumento`
+    `${webUrl}/_api/web/GetFileByServerRelativePath(decodedurl='${escapeODataValue(fileUrl)}')/ListItemAllFields?$select=Id,Title,FileLeafRef,NombreDocumento,Tipodedocumento,CategoriaDocumento,Codigodedocumento,AreaDuena,AreaImpactada,SolicitudId,Clasificaciondeproceso,Macroproceso,Proceso,Subproceso,Resumen,FechaDeAprobacion,FechaDeVigencia,InstanciaDeAprobacionId,VersionDocumento,Accion,Aprobadores,Descripcion,DocumentoPadreId`
   );
 }
 
@@ -360,6 +378,127 @@ async function updateFileMetadataByPath(context: WebPartContext, webUrl: string,
     payload,
     'MERGE'
   );
+}
+
+async function getHistoricoFileForRenew(
+  context: WebPartContext,
+  webUrl: string,
+  solicitud: any,
+  attachmentFileName?: string,
+  log?: LogFn
+): Promise<{ Id: number; FileRef: string; FileLeafRef: string; Title: string; } | null> {
+  const items = await getAllItems<any>(
+    context,
+    `${webUrl}/_api/web/GetList('${escapeODataValue(HISTORICOS_ROOT)}')/items?$select=Id,FileRef,FileLeafRef,Title&$top=5000`
+  );
+
+  const rows = (items || [])
+    .map((item) => ({
+      Id: Number(item?.Id || 0),
+      FileRef: String(item?.FileRef || ''),
+      FileLeafRef: String(item?.FileLeafRef || ''),
+      Title: String(item?.Title || '').trim()
+    }))
+    .filter((item) => item.Id > 0 && item.FileRef);
+
+  if (!rows.length) {
+    return null;
+  }
+
+  const nombreDocumento = normalizeHeader(String(solicitud?.NombreDocumento || solicitud?.Title || '').trim());
+  const attachmentName = normalizeHeader(String(attachmentFileName || '').trim());
+  const rawNombreDocumento = String(solicitud?.NombreDocumento || solicitud?.Title || '').trim();
+  const rawAttachmentName = String(attachmentFileName || '').trim();
+  const historicalBaseName = removeHistoricalSuffix(rawAttachmentName);
+  const historicalPdfName = /\.docx$/i.test(historicalBaseName)
+    ? replaceExtension(historicalBaseName, '.pdf')
+    : historicalBaseName;
+  const expectedHistoricalNames = Array.from(
+    new Set(
+      [historicalBaseName, historicalPdfName]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    )
+  );
+  const expectedHistoricalNamesNormalized = new Set(
+    expectedHistoricalNames.map((value) => normalizeHeader(value))
+  );
+
+  log?.(
+    `🔎 Renovar | Buscando en históricos | Solicitud=${solicitud?.Id || ''} | ` +
+    `Title="${rawNombreDocumento}" | Archivo="${rawAttachmentName}" | ` +
+    `HistoricoEsperado="${expectedHistoricalNames.join(' | ')}"`
+  );
+
+  let candidatos = nombreDocumento
+    ? rows.filter((item) => normalizeHeader(String(item.Title || '').trim()) === nombreDocumento)
+    : [];
+
+  if (candidatos.length) {
+    log?.(`🔎 Renovar | Coincidencias por Title en históricos: ${candidatos.length}`);
+  }
+
+  if (!candidatos.length && expectedHistoricalNamesNormalized.size) {
+    candidatos = rows.filter((item) => {
+      const fileLeafBase = normalizeHeader(removeHistoricalSuffix(item.FileLeafRef).trim());
+      return expectedHistoricalNamesNormalized.has(fileLeafBase);
+    });
+    if (candidatos.length) {
+      log?.(`🔎 Renovar | Coincidencias por archivo base en históricos: ${candidatos.length}`);
+    }
+  }
+
+  if (!candidatos.length) {
+    const sampleFiles = rows
+      .slice(0, 5)
+      .map((item) => item.FileLeafRef)
+      .filter(Boolean)
+      .join(' | ');
+    if (sampleFiles) {
+      log?.(`🔎 Renovar | Muestra archivos en históricos: ${sampleFiles}`);
+    }
+    log?.(`⚠️ Renovar | No se encontraron coincidencias en históricos para Solicitud=${solicitud?.Id || ''}`);
+    return null;
+  }
+
+  candidatos.sort((a, b) => a.Id - b.Id);
+  return candidatos[candidatos.length - 1];
+}
+
+async function updateProcesosMetadataForRenew(params: {
+  context: WebPartContext;
+  webUrl: string;
+  targetFileUrl: string;
+  solicitud: any;
+  baseMetadata: any;
+}): Promise<void> {
+  const areaImpactadaRaw = params.baseMetadata?.AreaImpactada || '';
+  const areaImpactada = Array.isArray(areaImpactadaRaw)
+    ? areaImpactadaRaw
+    : String(areaImpactadaRaw || '').split(/[;/]/).map((item) => String(item || '').trim()).filter(Boolean);
+
+  const payload: any = {
+    Clasificaciondeproceso: params.baseMetadata?.Clasificaciondeproceso || params.solicitud?.ProcesoDeNegocio?.Title || '',
+    AreaDuena: params.baseMetadata?.AreaDuena || '',
+    VersionDocumento: params.solicitud?.VersionDocumento || params.baseMetadata?.VersionDocumento || '',
+    AreaImpactada: areaImpactada,
+    Macroproceso: params.baseMetadata?.Macroproceso || params.solicitud?.ProcesoDeNegocio?.Title || '',
+    Proceso: params.baseMetadata?.Proceso || params.solicitud?.ProcesoDeNegocio?.field_1 || '',
+    Subproceso: params.baseMetadata?.Subproceso || params.solicitud?.ProcesoDeNegocio?.field_2 || '',
+    Tipodedocumento: params.baseMetadata?.Tipodedocumento || params.solicitud?.TipoDocumento?.Title || '',
+    SolicitudId: Number(params.solicitud?.Id || 0) || null,
+    Codigodedocumento: params.solicitud?.CodigoDocumento || params.baseMetadata?.Codigodedocumento || '',
+    Resumen: params.solicitud?.ResumenDocumento || params.baseMetadata?.Resumen || '',
+    CategoriaDocumento: params.baseMetadata?.CategoriaDocumento || params.solicitud?.CategoriadeDocumento || '',
+    FechaDeAprobacion: params.solicitud?.FechaDeAprobacionSolicitud || params.baseMetadata?.FechaDeAprobacion || null,
+    FechaDePublicacion: new Date().toISOString(),
+    FechaDeVigencia: params.solicitud?.FechadeVigencia || params.baseMetadata?.FechaDeVigencia || null,
+    InstanciaDeAprobacionId: Number(params.solicitud?.InstanciasdeaprobacionId || params.baseMetadata?.InstanciaDeAprobacionId || 0) || null,
+    Accion: 'Actualización de documento',
+    NombreDocumento: params.solicitud?.NombreDocumento || params.solicitud?.Title || params.baseMetadata?.NombreDocumento || ''
+  };
+
+  await updateFileMetadataByPath(params.context, params.webUrl, params.targetFileUrl, payload);
 }
 
 async function getLookupListIdFromField(
@@ -469,6 +608,104 @@ async function obtenerSiguienteCorrelativoHijo(
   );
 
   return Number(items?.[0]?.CorrelativoHijo || 0) + 1;
+}
+
+async function getCodigoDocumentoRegistroById(
+  context: WebPartContext,
+  webUrl: string,
+  itemId: number
+): Promise<{ Id: number; Title: string; CodigoBase: string; CorrelativoPadre: number; }> {
+  const item = await spGetJson<any>(
+    context,
+    `${webUrl}/_api/web/lists/getbytitle('${escapeODataValue(CODIGOS_DOCUMENTOS_LIST)}')/items(${itemId})?$select=Id,Title,CodigoBase,CorrelativoPadre`
+  );
+
+  return {
+    Id: Number(item?.Id || 0),
+    Title: String(item?.Title || '').trim(),
+    CodigoBase: String(item?.CodigoBase || '').trim(),
+    CorrelativoPadre: Number(item?.CorrelativoPadre || 0)
+  };
+}
+
+async function obtenerSiguienteCorrelativoDF(
+  context: WebPartContext,
+  webUrl: string,
+  codigoDocumentoPadre: string
+): Promise<number> {
+  const filter = `CodigoBase eq '${String(codigoDocumentoPadre || '').replace(/'/g, `''`)}' and TipoSoporte eq 'DF'`;
+  const items = await getAllItems<any>(
+    context,
+    `${webUrl}/_api/web/lists/getbytitle('${escapeODataValue(CODIGOS_DOCUMENTOS_LIST)}')/items?$select=Id,CorrelativoHijo&$filter=${encodeURIComponent(filter)}&$orderby=CorrelativoHijo desc&$top=1`
+  );
+
+  return Number(items?.[0]?.CorrelativoHijo || 0) + 1;
+}
+
+async function registerCodigoDiagramaWithRetry(params: {
+  context: WebPartContext;
+  webUrl: string;
+  parentCodigoRegistroId: number;
+  parentCodigoCompleto: string;
+  parentCodigoBase: string;
+  correlativoPadre: number;
+  log?: LogFn;
+}): Promise<{ codigo: string; registroId: number; correlativoHijo: number; }> {
+  const log = params.log || (() => undefined);
+  const maxRetries = 8;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const correlativoHijo = await obtenerSiguienteCorrelativoDF(
+      params.context,
+      params.webUrl,
+      params.parentCodigoCompleto
+    );
+    const codigo =
+      `DS-${params.parentCodigoBase}-${String(params.correlativoPadre).padStart(3, '0')}-DF-${String(correlativoHijo).padStart(2, '0')}`;
+
+    const existentesAntes = await getCodigosDocumentosByTitle(params.context, params.webUrl, codigo);
+    if (existentesAntes.length) {
+      log(`⚠️ Código de diagrama ya existente en Códigos Documentos, reintentando | ${codigo}`);
+      continue;
+    }
+
+    const creado = await spPostJson<any>(
+      params.context,
+      params.webUrl,
+      `${params.webUrl}/_api/web/lists/getbytitle('${escapeODataValue(CODIGOS_DOCUMENTOS_LIST)}')/items`,
+      {
+        Title: codigo,
+        CodigoBase: params.parentCodigoCompleto,
+        CategoriaDocumento: 'DS',
+        CorrelativoPadre: params.correlativoPadre,
+        TipoSoporte: 'DF',
+        CorrelativoHijo: correlativoHijo,
+        DocumentoPadreId: params.parentCodigoRegistroId
+      },
+      'POST'
+    );
+    const registroId = Number(creado?.Id || 0);
+    if (!registroId) {
+      throw new Error(`No se pudo registrar el código de diagrama "${codigo}" en Códigos Documentos.`);
+    }
+
+    const existentesDespues = await getCodigosDocumentosByTitle(params.context, params.webUrl, codigo);
+    existentesDespues.sort((a, b) => Number(a?.Id || 0) - Number(b?.Id || 0));
+    const ganadorId = Number(existentesDespues[0]?.Id || 0);
+
+    if (ganadorId === registroId) {
+      return {
+        codigo,
+        registroId,
+        correlativoHijo
+      };
+    }
+
+    await deleteListItem(params.context, params.webUrl, CODIGOS_DOCUMENTOS_LIST, registroId);
+    log(`⚠️ Colisión concurrente al reservar código de diagrama, se liberó el registro ${registroId} y se reintenta.`);
+  }
+
+  throw new Error(`No se pudo reservar un código único de diagrama para el padre ${params.parentCodigoCompleto}.`);
 }
 
 async function resolveFirstExistingFieldInternalName(
@@ -798,35 +1035,6 @@ async function publishReplacementToProcesos(params: {
   params.log?.(`📄 Archivo en Procesos reemplazado | ${fileName}`);
 }
 
-function chooseGroupTargets(group: ISolicitudRuntimeInfo[]): {
-  keeperId?: number;
-  changeIds: number[];
-  skipReason?: string;
-} {
-  const sorted = group.slice().sort((a, b) => {
-    const createdDiff = parseDateSafe(a.created) - parseDateSafe(b.created);
-    if (createdDiff !== 0) {
-      return createdDiff;
-    }
-
-    return a.id - b.id;
-  });
-
-  const withDependencias = sorted.filter((item) => item.hasDependencias);
-  if (withDependencias.length > 1) {
-    return {
-      changeIds: [],
-      skipReason: 'El grupo tiene más de una solicitud con hijos o diagramas; se omite por ahora.'
-    };
-  }
-
-  const keeper = withDependencias.length === 1 ? withDependencias[0] : sorted[0];
-  return {
-    keeperId: keeper.id,
-    changeIds: sorted.filter((item) => item.id !== keeper.id).map((item) => item.id)
-  };
-}
-
 function isPdfConversionFailure(error: any): boolean {
   const message = error instanceof Error ? error.message : String(error || '');
   const trace = error?.executionTrace as IExecutionTrace | undefined;
@@ -888,6 +1096,7 @@ async function enrichRowInfo(params: {
     created: params.input.created,
     title: params.input.title,
     nombreDocumento: params.input.nombreDocumento,
+    procesar: params.input.procesar,
     categoriaDocumento: tipoDocumentoData.codigoCategoria || '',
     solicitud,
     childIds,
@@ -946,6 +1155,9 @@ async function applyCodigoChange(params: {
   let tempFileUrl = '';
   let nuevoCodigo = '';
   let codigoRegistroId = 0;
+  let diagramasParaDocumento = params.info.diagramas.map((item) => ({ ...item }));
+  const diagramRollbackEntries: Array<{ itemId: number; oldCodigo: string; }> = [];
+  const diagramCodigoRegistroIds: number[] = [];
   const trace: IExecutionTrace = {
     pasoFallido: '',
     codigoRegistroId: '',
@@ -980,6 +1192,45 @@ async function applyCodigoChange(params: {
 
     log(`🛠️ ${rowLabel} | Solicitud ${solicitudId} | Código actual="${oldCodigo}" | Nuevo="${nuevoCodigo}" | RegistroCodigo=${codigoRegistroId}`);
 
+    if (params.info.diagramas.length) {
+      trace.pasoFallido = 'ActualizarDiagramasFlujo';
+      log(`🧭 ${rowLabel} | Actualizando códigos de ${params.info.diagramas.length} diagrama(s) con base en el nuevo código padre...`);
+      const parentCodigoRegistro = await getCodigoDocumentoRegistroById(params.context, params.webUrl, codigoRegistroId);
+      const sortedDiagramas = params.info.diagramas.slice().sort((a, b) => a.id - b.id);
+      diagramasParaDocumento = [];
+
+      for (let i = 0; i < sortedDiagramas.length; i++) {
+        const diagrama = sortedDiagramas[i];
+        const codigoDiagrama = await registerCodigoDiagramaWithRetry({
+          context: params.context,
+          webUrl: params.webUrl,
+          parentCodigoRegistroId: parentCodigoRegistro.Id,
+          parentCodigoCompleto: nuevoCodigo,
+          parentCodigoBase: parentCodigoRegistro.CodigoBase,
+          correlativoPadre: parentCodigoRegistro.CorrelativoPadre,
+          log
+        });
+
+        diagramCodigoRegistroIds.push(codigoDiagrama.registroId);
+        diagramRollbackEntries.push({
+          itemId: diagrama.id,
+          oldCodigo: diagrama.codigo
+        });
+
+        await updateListItem(params.context, params.webUrl, 'Diagramas de Flujo', diagrama.id, {
+          Codigo: codigoDiagrama.codigo
+        });
+
+        diagramasParaDocumento.push({
+          ...diagrama,
+          codigo: codigoDiagrama.codigo
+        });
+
+        log(`🧭 ${rowLabel} | Diagrama ${diagrama.id} actualizado | Código="${codigoDiagrama.codigo}"`);
+      }
+
+    }
+
     trace.pasoFallido = 'RegenerarAdjunto';
     log(`🧾 ${rowLabel} | Regenerando adjunto...`);
     const attachResult = await fillAndAttachFromServerRelativeUrl({
@@ -999,7 +1250,7 @@ async function applyCodigoChange(params: {
       version: solicitud?.VersionDocumento || '1.0',
       codigoDocumento: nuevoCodigo,
       relacionados: params.info.related.map((item) => ({ codigo: item.codigo, nombre: item.nombre, enlace: item.enlace })),
-      diagramasFlujo: params.info.diagramas.map((item) => ({ codigo: item.codigo, nombre: item.nombre, enlace: item.enlace })),
+      diagramasFlujo: diagramasParaDocumento.map((item) => ({ codigo: item.codigo, nombre: item.nombre, enlace: item.enlace })),
       tempDestinoFolderServerRelativeUrl: tempDestino,
       replaceIfExists: true,
       log
@@ -1060,6 +1311,18 @@ async function applyCodigoChange(params: {
       throw error;
     }
 
+    if (diagramRollbackEntries.length) {
+      for (let i = 0; i < diagramRollbackEntries.length; i++) {
+        try {
+          await updateListItem(params.context, params.webUrl, 'Diagramas de Flujo', diagramRollbackEntries[i].itemId, {
+            Codigo: diagramRollbackEntries[i].oldCodigo
+          });
+        } catch (_rollbackError) {
+          // sin acción
+        }
+      }
+    }
+
     if (processMetadataUpdated) {
       try {
         await updateFileMetadataByPath(params.context, params.webUrl, processFile.FileRef, {
@@ -1109,6 +1372,135 @@ async function applyCodigoChange(params: {
       } catch (_rollbackError) {
         // sin acción
       }
+    }
+
+    for (let i = 0; i < diagramCodigoRegistroIds.length; i++) {
+      try {
+        await deleteListItem(params.context, params.webUrl, CODIGOS_DOCUMENTOS_LIST, diagramCodigoRegistroIds[i]);
+      } catch (_rollbackError) {
+        // sin acción
+      }
+    }
+
+    (error as any).executionTrace = trace;
+    throw error;
+  }
+}
+
+async function applyRenovarSolicitud(params: {
+  context: WebPartContext;
+  webUrl: string;
+  info: ISolicitudRuntimeInfo;
+  rowLabel?: string;
+  log?: LogFn;
+}): Promise<{ attachmentFileName: string; processFileUrl: string; tempFileUrl: string; trace: IExecutionTrace; }> {
+  const log = params.log || (() => undefined);
+  const rowLabel = params.rowLabel || `Fila ${params.info.rowIndex}`;
+  const solicitud = params.info.solicitud;
+  const solicitudId = params.info.id;
+  const attachment = params.info.attachment;
+
+  if (!solicitud?.Id) {
+    throw new Error(`No se encontró la solicitud ${solicitudId}.`);
+  }
+
+  if (!attachment?.ServerRelativeUrl || !attachment?.FileName) {
+    throw new Error(`La solicitud ${solicitudId} no tiene adjunto compatible para renovar.`);
+  }
+
+  const historicoFile = await getHistoricoFileForRenew(
+    params.context,
+    params.webUrl,
+    solicitud,
+    attachment.FileName,
+    log
+  );
+  if (!historicoFile?.FileRef) {
+    throw new Error(`No se encontró archivo en históricos para la solicitud ${solicitudId}.`);
+  }
+
+  const historicoMetadata = await getFileItemMetadata(params.context, params.webUrl, historicoFile.FileRef);
+  const relativeFolder = getRelativeFolderWithinHistoricos(historicoFile.FileRef);
+  const targetFolder = joinFolder(PROCESOS_ROOT, relativeFolder);
+  const restoredHistoricalName = removeHistoricalSuffix(historicoFile.FileLeafRef);
+  const outputFileName = /\.docx$/i.test(attachment.FileName)
+    ? replaceExtension(restoredHistoricalName || attachment.FileName, '.pdf')
+    : (restoredHistoricalName || attachment.FileName);
+  const processFileUrl = `${targetFolder}/${outputFileName}`;
+  const tempDestino = joinFolder(TEMP_WORD_ROOT, relativeFolder);
+  const attachmentBlob = await downloadBlobByServerRelativeUrl(params.webUrl, attachment.ServerRelativeUrl);
+  const tempFileUrl = await uploadFileToFolder(
+    params.context,
+    params.webUrl,
+    tempDestino,
+    attachment.FileName,
+    attachmentBlob
+  );
+
+  const trace: IExecutionTrace = {
+    pasoFallido: '',
+    codigoRegistroId: '',
+    codigoReservado: 'No',
+    adjuntoRegenerado: 'No',
+    procesoReemplazado: 'No',
+    solicitudActualizada: 'No',
+    metadataProcesosActualizada: 'No',
+    tempFileUrl,
+    rollbackOmitido: 'No',
+    rollbackCodigoRegistro: 'No',
+    rollbackAdjunto: 'No',
+    rollbackProceso: 'No',
+    rollbackSolicitud: 'No',
+    rollbackMetadataProcesos: 'No'
+  };
+
+  log(`📂 ${rowLabel} | Archivo renovado copiado a TEMP | ${tempFileUrl}`);
+
+  trace.pasoFallido = 'ActualizarSolicitud';
+  await updateListItem(params.context, params.webUrl, 'Solicitudes', solicitudId, {
+    EsVersionActualDocumento: true
+  });
+  trace.solicitudActualizada = 'Si';
+  log(`📝 ${rowLabel} | Solicitud ${solicitudId} marcada como versión actual.`);
+
+  try {
+    trace.pasoFallido = 'ReemplazarProceso';
+    log(`📚 ${rowLabel} | Publicando documento renovado en Procesos...`);
+    await publishReplacementToProcesos({
+      context: params.context,
+      webUrl: params.webUrl,
+      tempFileUrl,
+      targetProcessFileUrl: processFileUrl,
+      log
+    });
+    trace.procesoReemplazado = 'Si';
+
+    trace.pasoFallido = 'ActualizarMetadataProcesos';
+    await updateProcesosMetadataForRenew({
+      context: params.context,
+      webUrl: params.webUrl,
+      targetFileUrl: processFileUrl,
+      solicitud,
+      baseMetadata: historicoMetadata
+    });
+    trace.metadataProcesosActualizada = 'Si';
+    log(`🗂️ ${rowLabel} | Metadata de Procesos actualizada para renovación.`);
+
+    trace.pasoFallido = 'EliminarHistorico';
+    await recycleFile(params.context, params.webUrl, historicoFile.FileRef);
+    trace.pasoFallido = '';
+    log(`🗑️ ${rowLabel} | Histórico eliminado | ${historicoFile.FileRef}`);
+
+    return {
+      attachmentFileName: attachment.FileName,
+      processFileUrl,
+      tempFileUrl,
+      trace
+    };
+  } catch (error) {
+    if (shouldPreserveTempWithoutRollback(trace, error)) {
+      trace.rollbackOmitido = 'Si';
+      log(`⚠️ ${rowLabel} | Falló la conversión a PDF en renovación. Se conserva el archivo en TEMP y no se ejecuta rollback.`);
     }
 
     (error as any).executionTrace = trace;
@@ -1202,6 +1594,8 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
     const title = String(getCellByCandidates(row, headerMap, ['Title']) || '').trim();
     const nombreDocumento = String(getCellByCandidates(row, headerMap, ['NombreDocumento']) || '').trim();
     const created = String(getCellByCandidates(row, headerMap, ['Created']) || '').trim();
+    const procesarRaw = String(getCellByCandidates(row, headerMap, ['Procesar']) || '').trim();
+    const procesarMode = getProcesarMode(procesarRaw);
 
     if (!id && !codigoDocumento && !title && !nombreDocumento) {
       continue;
@@ -1215,15 +1609,16 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
       versionDocumento,
       title,
       nombreDocumento,
-      created
+      created,
+      procesar: procesarMode !== '',
+      procesarRaw,
+      procesarMode
     });
   }
 
   if (!inputRows.length) {
     throw new Error('El Excel no tiene filas utilizables.');
   }
-
-  const liveInfos: ISolicitudRuntimeInfo[] = [];
 
   log(`📄 Excel cargado: ${session.fileName}`);
   log(`📋 Filas detectadas: ${inputRows.length}`);
@@ -1236,6 +1631,14 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
   for (let i = 0; i < inputRows.length; i++) {
     const row = outputGrid[inputRows[i].rowIndex] || [];
     const rowLabel = `Fila ${i + 1}/${inputRows.length}`;
+
+    if (!inputRows[i].procesar) {
+      row[idxEstado] = 'SKIP';
+      row[idxDetalle] = `La columna Procesar está en "${inputRows[i].procesarRaw || '(vacía)'}". Solo se procesa cuando vale SI o Renovar.`;
+      outputGrid[inputRows[i].rowIndex] = row;
+      skipped++;
+      continue;
+    }
 
     if (!inputRows[i].id) {
       row[idxEstado] = 'ERROR';
@@ -1280,78 +1683,43 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
         continue;
       }
 
-      liveInfos.push(info);
-    } catch (rowError) {
-      const message = rowError instanceof Error ? rowError.message : String(rowError);
-      row[idxEstado] = 'ERROR';
-      row[idxDetalle] = message;
-      outputGrid[inputRows[i].rowIndex] = row;
-      error++;
-    }
-  }
-
-  const groups = new Map<string, ISolicitudRuntimeInfo[]>();
-  for (let i = 0; i < liveInfos.length; i++) {
-    const key = normKey(liveInfos[i].codigoDocumento);
-    if (!groups.has(key)) {
-      groups.set(key, []);
-    }
-    groups.get(key)!.push(liveInfos[i]);
-  }
-
-  for (const group of Array.from(groups.values())) {
-    if (group.length < 2) {
-      for (let i = 0; i < group.length; i++) {
-        const row = outputGrid[group[i].rowIndex] || [];
+      if (inputRows[i].procesarMode === 'si' && info.childIds.length > 0) {
         row[idxEstado] = 'SKIP';
-        row[idxDetalle] = 'El código ya no aparece duplicado en las filas válidas del Excel.';
-        outputGrid[group[i].rowIndex] = row;
+        row[idxDetalle] = 'La solicitud tiene documentos hijos; se omite por ahora.';
+        row[idxSolicitud] = info.id;
+        outputGrid[inputRows[i].rowIndex] = row;
         skipped++;
-      }
-      continue;
-    }
-
-    const decision = chooseGroupTargets(group);
-    if (decision.skipReason) {
-      for (let i = 0; i < group.length; i++) {
-        const row = outputGrid[group[i].rowIndex] || [];
-        row[idxEstado] = 'SKIP';
-        row[idxDetalle] = decision.skipReason;
-        outputGrid[group[i].rowIndex] = row;
-        skipped++;
-      }
-      continue;
-    }
-
-    let currentKeeperId = decision.keeperId;
-    let keeperMoved = false;
-    const swappableKeeper = !!group.find((item) => item.id === decision.keeperId && !item.hasDependencias);
-
-    for (let i = 0; i < group.length; i++) {
-      const info = group[i];
-      if (decision.changeIds.indexOf(info.id) === -1) {
         continue;
       }
 
-      const row = outputGrid[info.rowIndex] || [];
       processed++;
-      const rowLabel = `FilaExcel ${info.rowIndex}`;
+      const applyRowLabel = `FilaExcel ${info.rowIndex}`;
 
       try {
-        log(`🚀 ${rowLabel} | Aplicando cambio de código a solicitud ${info.id}...`);
-        const result = await applyCodigoChange({
-          context: params.context,
-          webUrl,
-          info,
-          rowLabel,
-          log
-        });
+        log(`🚀 ${applyRowLabel} | Aplicando cambio de código a solicitud ${info.id}...`);
+        const result = inputRows[i].procesarMode === 'renovar'
+          ? await applyRenovarSolicitud({
+            context: params.context,
+            webUrl,
+            info,
+            rowLabel: applyRowLabel,
+            log
+          })
+          : await applyCodigoChange({
+            context: params.context,
+            webUrl,
+            info,
+            rowLabel: applyRowLabel,
+            log
+          });
 
         row[idxEstado] = 'OK';
-        row[idxDetalle] = info.hasDependencias
-          ? 'Se cambió el código porque en el grupo solo una solicitud podía conservar el código original.'
-          : 'Se cambió el código por ser una solicitud posterior dentro del grupo duplicado.';
-        row[idxNuevoCodigo] = result.nuevoCodigo;
+        row[idxDetalle] = inputRows[i].procesarMode === 'renovar'
+          ? 'Se renovó la solicitud: se marcó como versión actual, se publicó nuevamente en Procesos y se eliminó el histórico asociado.'
+          : info.diagramas.length
+            ? 'Se cambió el código del documento y también los códigos de sus diagramas de flujo asociados.'
+            : 'Se cambió el código del documento seleccionado.';
+        row[idxNuevoCodigo] = (result as any).nuevoCodigo || info.codigoDocumento;
         row[idxSolicitud] = info.id;
         row[idxProceso] = result.processFileUrl;
         row[idxAdjunto] = result.attachmentFileName;
@@ -1369,87 +1737,9 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
         row[idxRollbackProceso] = result.trace.rollbackProceso;
         row[idxRollbackSolicitud] = result.trace.rollbackSolicitud;
         row[idxRollbackMetadataProcesos] = result.trace.rollbackMetadataProcesos;
-        outputGrid[info.rowIndex] = row;
+        outputGrid[inputRows[i].rowIndex] = row;
         updated++;
       } catch (rowError) {
-        if (!shouldPreserveTempWithoutRollback((rowError as any)?.executionTrace as IExecutionTrace | undefined, rowError)
-          && isPdfConversionFailure(rowError) && swappableKeeper && !keeperMoved && currentKeeperId) {
-          const keeperInfo = group.find((item) => item.id === currentKeeperId);
-          if (keeperInfo) {
-            const keeperRow = outputGrid[keeperInfo.rowIndex] || [];
-            const failedTrace = (rowError as any)?.executionTrace as IExecutionTrace | undefined;
-            const failedMessage = rowError instanceof Error ? rowError.message : String(rowError);
-
-            log(
-              `⚠️ Solicitud ${info.id} | Falló la conversión a PDF. ` +
-              `Se intentará cambiar la solicitud ${keeperInfo.id}, dejando ${info.id} con el código original.`
-            );
-
-            processed++;
-            try {
-              const fallbackLabel = `${rowLabel} | Fallback`;
-              const fallbackResult = await applyCodigoChange({
-                context: params.context,
-                webUrl,
-                info: keeperInfo,
-                rowLabel: fallbackLabel,
-                log
-              });
-
-              keeperMoved = true;
-              currentKeeperId = info.id;
-
-              keeperRow[idxEstado] = 'OK';
-              keeperRow[idxDetalle] = 'Se cambió el código como alternativa porque la otra solicitud duplicada no pudo convertirse a PDF.';
-              keeperRow[idxNuevoCodigo] = fallbackResult.nuevoCodigo;
-              keeperRow[idxSolicitud] = keeperInfo.id;
-              keeperRow[idxProceso] = fallbackResult.processFileUrl;
-              keeperRow[idxAdjunto] = fallbackResult.attachmentFileName;
-              keeperRow[idxPasoFallido] = '';
-              keeperRow[idxArchivoTemp] = fallbackResult.trace.tempFileUrl;
-              keeperRow[idxCodigoRegistroId] = fallbackResult.trace.codigoRegistroId;
-              keeperRow[idxCodigoReservado] = fallbackResult.trace.codigoReservado;
-              keeperRow[idxAdjuntoRegenerado] = fallbackResult.trace.adjuntoRegenerado;
-              keeperRow[idxProcesoReemplazado] = fallbackResult.trace.procesoReemplazado;
-              keeperRow[idxSolicitudActualizada] = fallbackResult.trace.solicitudActualizada;
-              keeperRow[idxMetadataProcesosActualizada] = fallbackResult.trace.metadataProcesosActualizada;
-              keeperRow[idxRollbackOmitido] = fallbackResult.trace.rollbackOmitido;
-              keeperRow[idxRollbackCodigoRegistro] = fallbackResult.trace.rollbackCodigoRegistro;
-              keeperRow[idxRollbackAdjunto] = fallbackResult.trace.rollbackAdjunto;
-              keeperRow[idxRollbackProceso] = fallbackResult.trace.rollbackProceso;
-              keeperRow[idxRollbackSolicitud] = fallbackResult.trace.rollbackSolicitud;
-              keeperRow[idxRollbackMetadataProcesos] = fallbackResult.trace.rollbackMetadataProcesos;
-              outputGrid[keeperInfo.rowIndex] = keeperRow;
-              updated++;
-
-              row[idxEstado] = 'KEEP';
-              row[idxDetalle] = `Conserva el código porque la conversión a PDF falló al intentar cambiar esta solicitud, y se cambió la otra del grupo. Error original: ${failedMessage}`;
-              row[idxNuevoCodigo] = info.codigoDocumento;
-              row[idxSolicitud] = info.id;
-              row[idxPasoFallido] = failedTrace?.pasoFallido || '';
-              row[idxArchivoTemp] = failedTrace?.tempFileUrl || '';
-              row[idxCodigoRegistroId] = failedTrace?.codigoRegistroId || '';
-              row[idxCodigoReservado] = failedTrace?.codigoReservado || 'No';
-              row[idxAdjuntoRegenerado] = failedTrace?.adjuntoRegenerado || 'No';
-              row[idxProcesoReemplazado] = failedTrace?.procesoReemplazado || 'No';
-              row[idxSolicitudActualizada] = failedTrace?.solicitudActualizada || 'No';
-              row[idxMetadataProcesosActualizada] = failedTrace?.metadataProcesosActualizada || 'No';
-              row[idxRollbackOmitido] = failedTrace?.rollbackOmitido || 'No';
-              row[idxRollbackCodigoRegistro] = failedTrace?.rollbackCodigoRegistro || 'No';
-              row[idxRollbackAdjunto] = failedTrace?.rollbackAdjunto || 'No';
-              row[idxRollbackProceso] = failedTrace?.rollbackProceso || 'No';
-              row[idxRollbackSolicitud] = failedTrace?.rollbackSolicitud || 'No';
-              row[idxRollbackMetadataProcesos] = failedTrace?.rollbackMetadataProcesos || 'No';
-              outputGrid[info.rowIndex] = row;
-              skipped++;
-              continue;
-            } catch (fallbackError) {
-              const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-              log(`❌ Solicitud ${keeperInfo.id} | También falló el fallback del grupo: ${fallbackMessage}`);
-            }
-          }
-        }
-
         const message = rowError instanceof Error ? rowError.message : String(rowError);
         const trace = (rowError as any)?.executionTrace as IExecutionTrace | undefined;
         row[idxEstado] = 'ERROR';
@@ -1471,7 +1761,7 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
         row[idxRollbackProceso] = trace?.rollbackProceso || 'No';
         row[idxRollbackSolicitud] = trace?.rollbackSolicitud || 'No';
         row[idxRollbackMetadataProcesos] = trace?.rollbackMetadataProcesos || 'No';
-        outputGrid[info.rowIndex] = row;
+        outputGrid[inputRows[i].rowIndex] = row;
         error++;
         log(
           shouldPreserveTempWithoutRollback(trace, rowError)
@@ -1479,25 +1769,12 @@ export async function ejecutarCorreccionCodigosDuplicadosDesdeExcel(params: {
             : `❌ Solicitud ${info.id} | ${message}`
         );
       }
-    }
-
-    if (currentKeeperId) {
-      const keeperInfo = group.find((item) => item.id === currentKeeperId);
-      if (keeperInfo) {
-        const keeperRow = outputGrid[keeperInfo.rowIndex] || [];
-        if (!String(keeperRow[idxEstado] || '').trim()) {
-          keeperRow[idxEstado] = 'KEEP';
-          keeperRow[idxDetalle] = keeperInfo.hasDependencias
-            ? 'Conserva el código porque es la única solicitud con hijos o diagramas.'
-            : keeperMoved
-              ? 'Conserva el código original porque la otra solicitud del grupo no pudo convertirse a PDF.'
-              : 'Conserva el código por ser la solicitud más antigua del grupo.';
-          keeperRow[idxNuevoCodigo] = keeperInfo.codigoDocumento;
-          keeperRow[idxSolicitud] = keeperInfo.id;
-          outputGrid[keeperInfo.rowIndex] = keeperRow;
-          skipped++;
-        }
-      }
+    } catch (rowError) {
+      const message = rowError instanceof Error ? rowError.message : String(rowError);
+      row[idxEstado] = 'ERROR';
+      row[idxDetalle] = message;
+      outputGrid[inputRows[i].rowIndex] = row;
+      error++;
     }
   }
 

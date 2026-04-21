@@ -1122,7 +1122,7 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
           <div>
             <Text variant="xxLarge" className={styles.title}>Modificacion masiva</Text>
             <Text variant="large" className={styles.subtitle}>
-              Prepara el Excel de modificacion y ejecuta una revision inicial antes de conectar el flujo completo.
+              Prepara el Excel de modificación y ejecuta una revision inicial antes de conectar el flujo completo.
             </Text>
           </div>
           <div className={styles.heroBadge}>
@@ -1147,7 +1147,7 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                 </div>
 
                 <div className={styles.uploadContent}>
-                  <Text variant="large" className={styles.uploadTitle}>Excel de modificacion</Text>
+                  <Text variant="large" className={styles.uploadTitle}>Excel de modificación</Text>
                   <Text className={styles.uploadHint}>
                     Selecciona el Excel desde la misma biblioteca de SharePoint.
                   </Text>
