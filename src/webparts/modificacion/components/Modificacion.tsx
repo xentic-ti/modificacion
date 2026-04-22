@@ -40,6 +40,7 @@ import { exportarSolicitudesNoCreadasPorAntonio } from '../services/solicitudesN
 import { buscarSolicitudesDuplicadas } from '../services/solicitudesDuplicadas.service';
 import { ejecutarCambioInstanciaDesdeExcel } from '../services/modificacionCambioInstancia.service';
 import { ejecutarCorreccionCodigosDuplicadosDesdeExcel } from '../services/modificacionCodigoDuplicado.service';
+import { ejecutarBuscarDiagramaFlujoSinCodigo } from '../services/buscarDiagramaFlujoSinCodigo.service';
 
 const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, isDarkTheme }) => {
   const [excelFile, setExcelFile] = React.useState<IFilePickerResult | null>(null);
@@ -324,6 +325,32 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       setIsRunning(false);
     }
   }, [appendLog, context, descargarArchivo, excelFile]);
+
+  const ejecutarBuscarDiagramasSinCodigo = React.useCallback(async (): Promise<void> => {
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando utilitario Buscar Diagrama de Flujo sin codigo...');
+
+    try {
+      const resultado = await ejecutarBuscarDiagramaFlujoSinCodigo({
+        context,
+        log: appendLog
+      });
+
+      appendLog(`✅ Utilitario terminado. Diagramas sin codigo detectados: ${resultado.totalDiagramasSinCodigo}`);
+      appendLog(`✅ Solicitudes procesadas: ${resultado.solicitudesProcesadas}`);
+      appendLog(`✅ Diagramas corregidos: ${resultado.diagramasCorregidos}`);
+      appendLog(`✅ Solicitudes regeneradas/publicadas: ${resultado.solicitudesRegeneradas}`);
+      appendLog(`ℹ️ SKIP: ${resultado.skipped} | ERROR: ${resultado.error}`);
+      appendLog(`📂 Archivos TEMP generados: ${resultado.tempFileUrls.length}`);
+    } catch (runError) {
+      const errorMessage = runError instanceof Error ? runError.message : String(runError);
+      setError(errorMessage);
+      appendLog(`❌ Error en Buscar Diagrama de Flujo sin codigo: ${errorMessage}`);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context]);
 
   const ejecutarFase1 = React.useCallback(async (): Promise<void> => {
     if (!excelFile) {
@@ -1199,6 +1226,12 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                       text={isRunning ? 'Corrigiendo codigos...' : 'Corregir codigos duplicados'}
                       onClick={() => { void ejecutarCorreccionCodigosDuplicados(); }}
                       disabled={!excelFile || isRunning}
+                    />
+
+                    <DefaultButton
+                      text={isRunning ? 'Buscando diagramas...' : 'Buscar Diagrama de Flujo sin codigo'}
+                      onClick={() => { void ejecutarBuscarDiagramasSinCodigo(); }}
+                      disabled={isRunning}
                     />
                   </Stack>
                 </div>

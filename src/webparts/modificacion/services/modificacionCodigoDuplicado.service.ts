@@ -1156,11 +1156,39 @@ async function publishReplacementToProcesos(params: {
 function isPdfConversionFailure(error: any): boolean {
   const message = error instanceof Error ? error.message : String(error || '');
   const trace = error?.executionTrace as IExecutionTrace | undefined;
-  return (trace?.pasoFallido || '') === 'ReemplazarProceso' && /No se pudo convertir a PDF/i.test(message);
+  const normalizedMessage = String(message || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  return (trace?.pasoFallido || '') === 'ReemplazarProceso' && (
+    normalizedMessage.indexOf('no se pudo convertir a pdf') !== -1 ||
+    normalizedMessage.indexOf('convertir a pdf') !== -1 ||
+    normalizedMessage.indexOf('format=pdf') !== -1 ||
+    normalizedMessage.indexOf('content?format=pdf') !== -1
+  );
 }
 
 function shouldPreserveTempWithoutRollback(trace: IExecutionTrace | undefined, error: any): boolean {
-  return !!trace?.tempFileUrl && isPdfConversionFailure(error);
+  if (!trace?.tempFileUrl) {
+    return false;
+  }
+
+  if (isPdfConversionFailure(error)) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error || '');
+  const normalizedMessage = String(message || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  return (trace?.pasoFallido || '') === 'ReemplazarProceso' && (
+    normalizedMessage.indexOf('pdf') !== -1 ||
+    normalizedMessage.indexOf('convert') !== -1 ||
+    normalizedMessage.indexOf('graph') !== -1
+  );
 }
 
 function createEmptyExecutionTrace(): IExecutionTrace {
@@ -1650,8 +1678,25 @@ async function applyCodigoChange(params: {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error || '');
     if (shouldPreserveTempWithoutRollback(trace, error)) {
+      if (!solicitudUpdated && nuevoCodigo) {
+        try {
+          trace.pasoFallido = 'ActualizarSolicitud';
+          await updateListItem(params.context, params.webUrl, 'Solicitudes', solicitudId, {
+            CodigoDocumento: nuevoCodigo
+          });
+          solicitudUpdated = true;
+          trace.solicitudActualizada = 'Si';
+          log(`📝 ${rowLabel} | Conversión a PDF falló, pero la solicitud ${solicitudId} se actualizó con Código="${nuevoCodigo}" para conservar el nuevo código.`);
+        } catch (updateSolicitudError) {
+          const updateMessage = updateSolicitudError instanceof Error
+            ? updateSolicitudError.message
+            : String(updateSolicitudError || '');
+          log(`⚠️ ${rowLabel} | Falló también la actualización de la solicitud ${solicitudId} con el nuevo código "${nuevoCodigo}". Error="${updateMessage}"`);
+        }
+      }
+
       trace.rollbackOmitido = 'Si';
-      log(`⚠️ ${rowLabel} | Falló la conversión a PDF. Se conserva el documento generado en TEMP y no se ejecuta rollback.`);
+      log(`⚠️ ${rowLabel} | Falló la conversión a PDF. Se conserva el documento generado en TEMP y no se ejecuta rollback del nuevo código.`);
       log(`⚠️ ${rowLabel} | Resumen parcial | ${formatExecutionTraceSummary(trace)} | Error="${message}"`);
       (error as any).executionTrace = trace;
       throw error;
