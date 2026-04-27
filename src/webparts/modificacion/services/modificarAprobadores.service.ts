@@ -651,8 +651,9 @@ export async function modificarAprobadores(params: {
     }
 
     const impactos = await getImpactosFromCache(params.context, webUrl, solicitud, impactosCache);
+    const calculadoPorArea = impactos.porArea.has(aprobadorId);
     const correcto = {
-      ImpactadoPorArea: impactos.porArea.has(aprobadorId),
+      ImpactadoPorArea: currentArea || calculadoPorArea,
       ImpactadoPorMotivo: impactos.porMotivo.has(aprobadorId),
       ImpactadoPorAccion: impactos.porAccion.has(aprobadorId)
     };
@@ -686,8 +687,8 @@ export async function modificarAprobadores(params: {
       CambiariaImpactadoPorAccion: cambiaAccion ? 'Si' : 'No',
       ResultadoEnsayo: tieneCambios ? 'CAMBIARIA' : 'SIN_CAMBIOS',
       Motivo: tieneCambios
-        ? 'Los checks actuales no coinciden con los valores calculados por Área, Motivo o Acción.'
-        : 'Los checks actuales ya coinciden con los valores calculados.'
+        ? 'Los checks actuales no coinciden con los valores calculados por Área, Motivo o Acción. Si ImpactadoPorArea ya estaba marcado, se conserva aunque no se ubique por área.'
+        : 'Los checks actuales ya coinciden con los valores calculados. Si ImpactadoPorArea ya estaba marcado, se conserva aunque no se ubique por área.'
     };
 
     if (!tieneCambios) {
@@ -702,7 +703,7 @@ export async function modificarAprobadores(params: {
       await actualizarChecksAprobador(params.context, webUrl, Number(item.Id || 0), correcto);
       totalActualizados++;
       reportRow.ResultadoEnsayo = 'ACTUALIZADO';
-      reportRow.Motivo = 'Checks actualizados con los valores calculados por Área, Motivo y Acción.';
+      reportRow.Motivo = 'Checks actualizados con los valores calculados por Área, Motivo y Acción. Si ImpactadoPorArea ya estaba marcado, se conserva aunque no se ubique por área.';
       writeInfo(
         log,
         `✅ ModificarAprobadores | Actualizado | Registro=${item.Id} | Aprobador=${aprobadorId} | ` +
