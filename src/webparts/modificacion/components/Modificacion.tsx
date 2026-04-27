@@ -41,6 +41,7 @@ import { buscarSolicitudesDuplicadas } from '../services/solicitudesDuplicadas.s
 import { ejecutarCambioInstanciaDesdeExcel } from '../services/modificacionCambioInstancia.service';
 import { ejecutarCorreccionCodigosDuplicadosDesdeExcel } from '../services/modificacionCodigoDuplicado.service';
 import { ejecutarBuscarDiagramaFlujoSinCodigo } from '../services/buscarDiagramaFlujoSinCodigo.service';
+import { modificarAprobadores, rollbackModificarAprobadores } from '../services/modificarAprobadores.service';
 
 const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, isDarkTheme }) => {
   const [excelFile, setExcelFile] = React.useState<IFilePickerResult | null>(null);
@@ -211,6 +212,74 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       setIsRunning(false);
     }
   }, [appendLog, context, copiarHijosPadreDestinoId, copiarHijosPadreOrigenId, descargarArchivo]);
+
+  const ejecutarModificarAprobadores = React.useCallback(async (): Promise<void> => {
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando actualización de ModificarAprobadores para todos los revisores impactados...');
+
+    try {
+      const resultado = await modificarAprobadores({
+        context,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog(
+        `✅ ModificarAprobadores terminado. ` +
+        `Encontrados: ${resultado.totalEncontrados} | ` +
+        `Solicitudes evaluadas: ${resultado.totalSolicitudesEvaluadas} | ` +
+        `Solicitudes vigentes omitidas: ${resultado.totalSolicitudesVigentesOmitidas} | ` +
+        `Con cambios: ${resultado.totalCambiarian} | ` +
+        `Actualizados: ${resultado.totalActualizados} | ` +
+        `Omitidos: ${resultado.totalOmitidos} | ` +
+        `Error: ${resultado.totalError}`
+      );
+      appendLog(`📥 Archivo generado: ${resultado.fileName}`);
+    } catch (modifyError) {
+      const errorMessage = modifyError instanceof Error ? modifyError.message : String(modifyError);
+      setError(errorMessage);
+      appendLog('❌ Error en ModificarAprobadores: ' + errorMessage);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, descargarArchivo]);
+
+  const ejecutarRollbackModificarAprobadores = React.useCallback(async (): Promise<void> => {
+    if (!excelFile) {
+      setError('Debes seleccionar el Excel de resultado de ModificarAprobadores antes de ejecutar el rollback.');
+      appendLog('No se pudo iniciar el rollback de ModificarAprobadores porque no hay Excel seleccionado.');
+      return;
+    }
+
+    setError(null);
+    setIsRunning(true);
+    setLogRevision(`Iniciando rollback de ModificarAprobadores desde el archivo: ${excelFile.fileName}`);
+
+    try {
+      const resultado = await rollbackModificarAprobadores({
+        context,
+        excelFile,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog(
+        `✅ Rollback ModificarAprobadores terminado. ` +
+        `Filas: ${resultado.totalFilas} | ` +
+        `Restaurados: ${resultado.totalRestaurados} | ` +
+        `Omitidos: ${resultado.totalOmitidos} | ` +
+        `Error: ${resultado.totalError}`
+      );
+      appendLog(`📥 Archivo generado: ${resultado.fileName}`);
+    } catch (rollbackError) {
+      const errorMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+      setError(errorMessage);
+      appendLog('❌ Error en rollback ModificarAprobadores: ' + errorMessage);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, descargarArchivo, excelFile]);
 
   const ejecutarReporteSolicitudesNoAntonio = React.useCallback(async (): Promise<void> => {
     setError(null);
@@ -1273,6 +1342,34 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                         text={isRunning ? 'Copiando hijos...' : 'Copiar hijos'}
                         onClick={() => { void ejecutarCopiarHijos(); }}
                         disabled={!copiarHijosPadreOrigenId.trim() || !copiarHijosPadreDestinoId.trim() || isRunning}
+                      />
+                    </Stack>
+                  </Stack>
+                </Stack>
+              </div>
+
+              <div className={styles.utilityCard}>
+                <Stack tokens={{ childrenGap: 12 }}>
+                  <div>
+                    <Text variant="mediumPlus" className={styles.statusTitle}>ModificarAprobadores</Text>
+                    <Text className={styles.statusValue}>
+                      Recorre Aprobadores por Solicitudes, actualiza los checks de Revisor Impactado y genera un Excel con los valores anteriores para rollback.
+                    </Text>
+                  </div>
+
+                  <Stack horizontal wrap tokens={{ childrenGap: 12 }}>
+                    <Stack verticalAlign="end">
+                      <DefaultButton
+                        text={isRunning ? 'Actualizando...' : 'Aplicar ModificarAprobadores'}
+                        onClick={() => { void ejecutarModificarAprobadores(); }}
+                        disabled={isRunning}
+                      />
+                    </Stack>
+                    <Stack verticalAlign="end">
+                      <DefaultButton
+                        text={isRunning ? 'Restaurando...' : 'Rollback ModificarAprobadores'}
+                        onClick={() => { void ejecutarRollbackModificarAprobadores(); }}
+                        disabled={!excelFile || isRunning}
                       />
                     </Stack>
                   </Stack>
