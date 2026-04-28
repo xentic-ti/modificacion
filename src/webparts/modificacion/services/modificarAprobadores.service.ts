@@ -15,6 +15,13 @@ const LIST_APROBADORES = 'Aprobadores por Solicitudes';
 const LIST_ACCIONES = 'Acciones';
 const LIST_AREAS_NEGOCIO = 'Áreas de Negocio';
 const ROL_REVISOR_IMPACTADO = 'Revisor Impactado';
+const ESTADOS_BAJA_MOTIVO_PERMITIDOS = new Set<string>([
+  'observado',
+  'en edicion',
+  'rechazado',
+  'enviado a revision de calidad',
+  'en revision de calidad'
+]);
 
 interface ISolicitudItem {
   Id: number;
@@ -24,7 +31,12 @@ interface ISolicitudItem {
     Title?: string;
   };
   Accion?: string;
+  EstadoId?: number;
+  EsVersionActualDocumento?: boolean | string | number;
   Estado?: {
+    Title?: string;
+  };
+  EstadoAnteriorVencimiento?: string | {
     Title?: string;
   };
   TipoDocumento?: {
@@ -79,6 +91,18 @@ export interface IModificarAprobadoresRollbackResultado {
   totalError: number;
 }
 
+export interface IRevisoresBajaMotivoResultado {
+  blob: Blob;
+  fileName: string;
+  totalSolicitudes: number;
+  totalAprobadoresMotivoEsperados: number;
+  totalCrearRegistro: number;
+  totalMarcarMotivo: number;
+  totalSinCambios: number;
+  totalDuplicadosExistentes: number;
+  totalError: number;
+}
+
 interface IModificarAprobadoresReportRow {
   RegistroAprobadorId: number | '';
   SolicitudId: number | '';
@@ -105,6 +129,30 @@ interface IModificarAprobadoresReportRow {
   Motivo: string;
 }
 
+interface IRevisoresBajaMotivoReportRow {
+  SolicitudId: number | '';
+  SolicitudTitulo: string;
+  SolicitudEstado: string;
+  EstadoAnteriorVencimiento: string;
+  AccionSolicitud: string;
+  MotivoId: number | '';
+  MotivoSolicitud: string;
+  AprobadorId: number | '';
+  AprobadorNombre: string;
+  AprobadorEmail: string;
+  RegistroAprobadorId: number | '';
+  RegistrosMismoAprobador: string;
+  Rol: string;
+  ImpactadoPorAreaActual: string;
+  ImpactadoPorMotivoActual: string;
+  ImpactadoPorAccionActual: string;
+  AccionSugerida: string;
+  ImpactadoPorMotivoSugerido: string;
+  CrearRegistroSugerido: string;
+  EvitaDuplicado: string;
+  Observacion: string;
+}
+
 const reportHeaders = [
   'RegistroAprobadorId',
   'SolicitudId',
@@ -129,6 +177,30 @@ const reportHeaders = [
   'CambiariaImpactadoPorAccion',
   'ResultadoEnsayo',
   'Motivo'
+];
+
+const revisoresBajaMotivoHeaders = [
+  'SolicitudId',
+  'SolicitudTitulo',
+  'SolicitudEstado',
+  'EstadoAnteriorVencimiento',
+  'AccionSolicitud',
+  'MotivoId',
+  'MotivoSolicitud',
+  'AprobadorId',
+  'AprobadorNombre',
+  'AprobadorEmail',
+  'RegistroAprobadorId',
+  'RegistrosMismoAprobador',
+  'Rol',
+  'ImpactadoPorAreaActual',
+  'ImpactadoPorMotivoActual',
+  'ImpactadoPorAccionActual',
+  'AccionSugerida',
+  'ImpactadoPorMotivoSugerido',
+  'CrearRegistroSugerido',
+  'EvitaDuplicado',
+  'Observacion'
 ];
 
 function normalizeKey(value: any): string {
@@ -158,6 +230,35 @@ function formatAreasImpactadas(solicitud: ISolicitudItem | null | undefined): st
     .map((area) => String(area?.Title || '').trim())
     .filter(Boolean)
     .join('/');
+}
+
+function getEstadoAnteriorVencimientoTitle(solicitud: ISolicitudItem | null | undefined): string {
+  const estadoAnterior = solicitud?.EstadoAnteriorVencimiento;
+
+  if (typeof estadoAnterior === 'string') {
+    return estadoAnterior;
+  }
+
+  return String(estadoAnterior?.Title || '');
+}
+
+function debeProcesarBajaMotivo(solicitud: ISolicitudItem): boolean {
+  const accionKey = normalizeKey(solicitud?.Accion || '');
+  if (accionKey !== 'baja de documentos') {
+    return false;
+  }
+
+  const estadoKey = normalizeKey(solicitud?.Estado?.Title || '');
+  if (ESTADOS_BAJA_MOTIVO_PERMITIDOS.has(estadoKey)) {
+    return true;
+  }
+
+  if (estadoKey !== 'vencido') {
+    return false;
+  }
+
+  const estadoAnteriorKey = normalizeKey(getEstadoAnteriorVencimientoTitle(solicitud));
+  return ESTADOS_BAJA_MOTIVO_PERMITIDOS.has(estadoAnteriorKey);
 }
 
 function autoFitColumns(rows: IModificarAprobadoresReportRow[]): Array<{ wch: number; }> {
@@ -190,6 +291,46 @@ function buildModificarAprobadoresWorkbook(rows: IModificarAprobadoresReportRow[
   const pad = (value: number): string => String(value).padStart(2, '0');
   const fileName =
     `${prefix || 'Resultado_ModificarAprobadores'}_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
+    `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.xlsx`;
+
+  return {
+    blob: new Blob([output], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    }),
+    fileName
+  };
+}
+
+function autoFitRevisoresBajaMotivoColumns(rows: IRevisoresBajaMotivoReportRow[]): Array<{ wch: number; }> {
+  const widths = revisoresBajaMotivoHeaders.map((header) => ({ wch: header.length + 2 }));
+
+  rows.forEach((row) => {
+    revisoresBajaMotivoHeaders.forEach((header, index) => {
+      const value = String((row as any)[header] ?? '');
+      widths[index].wch = Math.min(Math.max(widths[index].wch, value.length + 2), 70);
+    });
+  });
+
+  return widths;
+}
+
+function buildRevisoresBajaMotivoWorkbook(rows: IRevisoresBajaMotivoReportRow[]): { blob: Blob; fileName: string; } {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.json_to_sheet(safeRows, { header: revisoresBajaMotivoHeaders });
+
+  worksheet['!cols'] = autoFitRevisoresBajaMotivoColumns(safeRows);
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'RevisoresBajaMotivo');
+
+  const output = XLSX.write(workbook, {
+    bookType: 'xlsx',
+    type: 'array'
+  });
+
+  const now = new Date();
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  const fileName =
+    `Revisores_Impactados_Baja_Motivo_DryRun_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
     `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.xlsx`;
 
   return {
@@ -327,6 +468,141 @@ async function obtenerTodosAprobadoresImpactados(
   return getAllItems<IAprobadorSolicitudItem>(context, url);
 }
 
+async function obtenerSolicitudesBajaDocumentosEnProceso(
+  context: WebPartContext,
+  webUrl: string
+): Promise<ISolicitudItem[]> {
+  const solicitudes = await getAllItems<ISolicitudItem>(
+    context,
+    `${webUrl}/_api/web/lists/getbytitle('${escapeODataValue(LIST_SOLICITUDES)}')/items` +
+    `?$select=Id,Title,MotivoId,Motivo/Title,Accion,EstadoId,Estado/Title,EstadoAnteriorVencimiento,EsVersionActualDocumento` +
+    `&$expand=Motivo,Estado` +
+    `&$top=5000`
+  );
+
+  return solicitudes.filter(debeProcesarBajaMotivo);
+}
+
+function buildBajaDocumentosStats(solicitudes: ISolicitudItem[]): {
+  total: number;
+  totalBaja: number;
+  totalBajaPermitidas: number;
+  totalBajaOmitidasPorEstado: number;
+  estadosBaja: string;
+} {
+  const estados = new Map<string, number>();
+  let totalBaja = 0;
+  let totalBajaPermitidas = 0;
+  let totalBajaOmitidasPorEstado = 0;
+
+  for (let i = 0; i < solicitudes.length; i++) {
+    const accionKey = normalizeKey(solicitudes[i]?.Accion || '');
+    if (accionKey !== 'baja de documentos') {
+      continue;
+    }
+
+    totalBaja++;
+    const estadoTitle = String(solicitudes[i]?.Estado?.Title || '(sin estado)').trim() || '(sin estado)';
+    estados.set(estadoTitle, (estados.get(estadoTitle) || 0) + 1);
+
+    if (debeProcesarBajaMotivo(solicitudes[i])) {
+      totalBajaPermitidas++;
+    } else {
+      totalBajaOmitidasPorEstado++;
+    }
+  }
+
+  const estadosBaja = Array.from(estados.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([estado, count]) => `${estado}: ${count}`)
+    .join(' | ');
+
+  return {
+    total: solicitudes.length,
+    totalBaja,
+    totalBajaPermitidas,
+    totalBajaOmitidasPorEstado,
+    estadosBaja
+  };
+}
+
+function buildAprobadoresBySolicitud(
+  aprobadores: IAprobadorSolicitudItem[]
+): Map<number, IAprobadorSolicitudItem[]> {
+  const result = new Map<number, IAprobadorSolicitudItem[]>();
+
+  for (let i = 0; i < aprobadores.length; i++) {
+    const solicitudId = Number(aprobadores[i]?.SolicitudId || 0);
+    if (!solicitudId) {
+      continue;
+    }
+
+    if (!result.has(solicitudId)) {
+      result.set(solicitudId, []);
+    }
+
+    result.get(solicitudId)!.push(aprobadores[i]);
+  }
+
+  return result;
+}
+
+function getBestExistingAprobador(items: IAprobadorSolicitudItem[]): IAprobadorSolicitudItem | null {
+  if (!items.length) {
+    return null;
+  }
+
+  const withMotivo = items.filter((item) => isTruthyField(item.ImpactadoPorMotivo));
+  if (withMotivo.length) {
+    return withMotivo[0];
+  }
+
+  const withArea = items.filter((item) => isTruthyField(item.ImpactadoPorArea));
+  if (withArea.length) {
+    return withArea[0];
+  }
+
+  return items[0];
+}
+
+function buildRevisoresBajaMotivoRow(params: {
+  solicitud: ISolicitudItem;
+  aprobadorId: number;
+  aprobadorNombre: string;
+  aprobadorEmail: string;
+  existingItems: IAprobadorSolicitudItem[];
+  accionSugerida: string;
+  crearRegistro: boolean;
+  evitaDuplicado: boolean;
+  observacion: string;
+}): IRevisoresBajaMotivoReportRow {
+  const best = getBestExistingAprobador(params.existingItems);
+
+  return {
+    SolicitudId: Number(params.solicitud.Id || 0) || '',
+    SolicitudTitulo: String(params.solicitud.Title || ''),
+    SolicitudEstado: String(params.solicitud.Estado?.Title || ''),
+    EstadoAnteriorVencimiento: getEstadoAnteriorVencimientoTitle(params.solicitud),
+    AccionSolicitud: String(params.solicitud.Accion || ''),
+    MotivoId: Number(params.solicitud.MotivoId || 0) || '',
+    MotivoSolicitud: String(params.solicitud.Motivo?.Title || ''),
+    AprobadorId: params.aprobadorId || '',
+    AprobadorNombre: params.aprobadorNombre || String(best?.Aprobador?.Title || ''),
+    AprobadorEmail: params.aprobadorEmail || String(best?.Aprobador?.EMail || ''),
+    RegistroAprobadorId: Number(best?.Id || 0) || '',
+    RegistrosMismoAprobador: params.existingItems.map((item) => String(item.Id || '')).filter(Boolean).join(', '),
+    Rol: ROL_REVISOR_IMPACTADO,
+    ImpactadoPorAreaActual: formatBoolean(isTruthyField(best?.ImpactadoPorArea)),
+    ImpactadoPorMotivoActual: formatBoolean(isTruthyField(best?.ImpactadoPorMotivo)),
+    ImpactadoPorAccionActual: formatBoolean(isTruthyField(best?.ImpactadoPorAccion)),
+    AccionSugerida: params.accionSugerida,
+    ImpactadoPorMotivoSugerido: formatBoolean(true),
+    CrearRegistroSugerido: params.crearRegistro ? 'Si' : 'No',
+    EvitaDuplicado: params.evitaDuplicado ? 'Si' : 'No',
+    Observacion: params.observacion
+  };
+}
+
 async function obtenerImpactadosPorMotivo(
   context: WebPartContext,
   webUrl: string,
@@ -344,6 +620,45 @@ async function obtenerImpactadosPorMotivo(
   );
 
   addToSet(result, getPersonIds(motivo?.Aprobadores));
+  return result;
+}
+
+async function obtenerAprobadoresMotivoDetalle(
+  context: WebPartContext,
+  webUrl: string,
+  motivoId: number | undefined
+): Promise<Array<{ id: number; title: string; email: string; }>> {
+  if (!motivoId) {
+    return [];
+  }
+
+  const motivo = await spGetJson<any>(
+    context,
+    `${webUrl}/_api/web/lists/getbytitle('${escapeODataValue(LIST_MOTIVOS)}')/items(${motivoId})` +
+    `?$select=Id,Aprobadores/Id,Aprobadores/Title,Aprobadores/EMail&$expand=Aprobadores`
+  );
+
+  const raw = motivo?.Aprobadores;
+  const values = Array.isArray(raw)
+    ? raw
+    : (raw && Array.isArray(raw.results) ? raw.results : []);
+  const seen = new Set<number>();
+  const result: Array<{ id: number; title: string; email: string; }> = [];
+
+  for (let i = 0; i < values.length; i++) {
+    const id = Number(values[i]?.Id || values[i] || 0);
+    if (!id || seen.has(id)) {
+      continue;
+    }
+
+    seen.add(id);
+    result.push({
+      id,
+      title: String(values[i]?.Title || ''),
+      email: String(values[i]?.EMail || '')
+    });
+  }
+
   return result;
 }
 
@@ -478,6 +793,217 @@ async function calcularImpactos(
 
 function getAprobadorId(item: IAprobadorSolicitudItem): number {
   return Number(item.AprobadorId || item.Aprobador?.Id || 0);
+}
+
+export async function generarReporteRevisoresImpactadosBajaMotivo(params: {
+  context: WebPartContext;
+  log?: LogFn;
+}): Promise<IRevisoresBajaMotivoResultado> {
+  const log = params.log || (() => undefined);
+  const webUrl = params.context.pageContext.web.absoluteUrl;
+
+  writeInfo(log, '🔎 Revisores Baja por Motivo | Consultando solicitudes con Acción="Baja de documentos" y estados permitidos...');
+  const todasSolicitudes = await getAllItems<ISolicitudItem>(
+    params.context,
+    `${webUrl}/_api/web/lists/getbytitle('${escapeODataValue(LIST_SOLICITUDES)}')/items` +
+    `?$select=Id,Title,MotivoId,Motivo/Title,Accion,EstadoId,Estado/Title,EstadoAnteriorVencimiento,EsVersionActualDocumento` +
+    `&$expand=Motivo,Estado` +
+    `&$top=5000`
+  );
+  const stats = buildBajaDocumentosStats(todasSolicitudes);
+  writeInfo(
+    log,
+    `📊 Revisores Baja por Motivo | Solicitudes leídas=${stats.total} | ` +
+    `Baja de documentos=${stats.totalBaja} | Baja permitidas=${stats.totalBajaPermitidas} | ` +
+    `Baja omitidas por estado=${stats.totalBajaOmitidasPorEstado}`
+  );
+  if (stats.estadosBaja) {
+    writeInfo(log, `📊 Revisores Baja por Motivo | Estados encontrados en Baja de documentos: ${stats.estadosBaja}`);
+  }
+
+  const solicitudes = todasSolicitudes.filter(debeProcesarBajaMotivo);
+  writeInfo(log, `📋 Revisores Baja por Motivo | Solicitudes candidatas: ${solicitudes.length}`);
+
+  writeInfo(log, `👥 Revisores Baja por Motivo | Consultando registros con Rol="${ROL_REVISOR_IMPACTADO}"...`);
+  const aprobadores = await obtenerTodosAprobadoresImpactados(params.context, webUrl);
+  const aprobadoresBySolicitud = buildAprobadoresBySolicitud(aprobadores);
+
+  let totalAprobadoresMotivoEsperados = 0;
+  let totalCrearRegistro = 0;
+  let totalMarcarMotivo = 0;
+  let totalSinCambios = 0;
+  let totalDuplicadosExistentes = 0;
+  let totalError = 0;
+  const reportRows: IRevisoresBajaMotivoReportRow[] = [];
+
+  for (let i = 0; i < solicitudes.length; i++) {
+    const solicitud = solicitudes[i];
+    const solicitudId = Number(solicitud.Id || 0);
+    const actuales = aprobadoresBySolicitud.get(solicitudId) || [];
+
+    if (!Number(solicitud.MotivoId || 0)) {
+      totalError++;
+      reportRows.push(buildRevisoresBajaMotivoRow({
+        solicitud,
+        aprobadorId: 0,
+        aprobadorNombre: '',
+        aprobadorEmail: '',
+        existingItems: [],
+        accionSugerida: 'ERROR',
+        crearRegistro: false,
+        evitaDuplicado: false,
+        observacion: 'La solicitud no tiene MotivoId; no se puede consultar aprobadores asociados al motivo.'
+      }));
+      continue;
+    }
+
+    let aprobadoresMotivo: Array<{ id: number; title: string; email: string; }> = [];
+    try {
+      aprobadoresMotivo = await obtenerAprobadoresMotivoDetalle(params.context, webUrl, Number(solicitud.MotivoId || 0));
+    } catch (error) {
+      totalError++;
+      reportRows.push(buildRevisoresBajaMotivoRow({
+        solicitud,
+        aprobadorId: 0,
+        aprobadorNombre: '',
+        aprobadorEmail: '',
+        existingItems: [],
+        accionSugerida: 'ERROR',
+        crearRegistro: false,
+        evitaDuplicado: false,
+        observacion: `No se pudo consultar la lista Motivos: ${error instanceof Error ? error.message : String(error)}`
+      }));
+      continue;
+    }
+
+    if (!aprobadoresMotivo.length) {
+      totalError++;
+      reportRows.push(buildRevisoresBajaMotivoRow({
+        solicitud,
+        aprobadorId: 0,
+        aprobadorNombre: '',
+        aprobadorEmail: '',
+        existingItems: [],
+        accionSugerida: 'ERROR',
+        crearRegistro: false,
+        evitaDuplicado: false,
+        observacion: 'El motivo asociado a la solicitud no tiene aprobadores configurados.'
+      }));
+      continue;
+    }
+
+    const aprobadoresMotivoIds = new Set<number>();
+    for (let j = 0; j < aprobadoresMotivo.length; j++) {
+      aprobadoresMotivoIds.add(aprobadoresMotivo[j].id);
+    }
+
+    const actualesPorMotivo = actuales.filter((item) =>
+      isTruthyField(item.ImpactadoPorMotivo) && aprobadoresMotivoIds.has(getAprobadorId(item))
+    );
+
+    if (actualesPorMotivo.length) {
+      totalSinCambios++;
+      reportRows.push(buildRevisoresBajaMotivoRow({
+        solicitud,
+        aprobadorId: getAprobadorId(actualesPorMotivo[0]),
+        aprobadorNombre: String(actualesPorMotivo[0]?.Aprobador?.Title || ''),
+        aprobadorEmail: String(actualesPorMotivo[0]?.Aprobador?.EMail || ''),
+        existingItems: actualesPorMotivo,
+        accionSugerida: actualesPorMotivo.length > 1 ? 'SIN_CAMBIOS_CON_DUPLICADOS_EXISTENTES' : 'SIN_CAMBIOS',
+        crearRegistro: false,
+        evitaDuplicado: true,
+        observacion: actualesPorMotivo.length > 1
+          ? 'Ya existe al menos un aprobador configurado en el motivo con ImpactadoPorMotivo marcado. Se detectaron varios registros; el dry run no modifica ni elimina duplicados.'
+          : 'Ya existe al menos un aprobador configurado en el motivo con ImpactadoPorMotivo marcado para la solicitud.'
+      }));
+
+      if (actualesPorMotivo.length > 1) {
+        totalDuplicadosExistentes++;
+      }
+
+      continue;
+    }
+
+    totalAprobadoresMotivoEsperados += aprobadoresMotivo.length;
+    for (let j = 0; j < aprobadoresMotivo.length; j++) {
+      const aprobadorMotivo = aprobadoresMotivo[j];
+      const existentesMismoAprobador = actuales.filter((item) => getAprobadorId(item) === aprobadorMotivo.id);
+      const existeConMotivo = existentesMismoAprobador.some((item) => isTruthyField(item.ImpactadoPorMotivo));
+      const existePorArea = existentesMismoAprobador.some((item) => isTruthyField(item.ImpactadoPorArea));
+
+      if (existentesMismoAprobador.length > 1) {
+        totalDuplicadosExistentes++;
+      }
+
+      if (existeConMotivo) {
+        totalSinCambios++;
+        reportRows.push(buildRevisoresBajaMotivoRow({
+          solicitud,
+          aprobadorId: aprobadorMotivo.id,
+          aprobadorNombre: aprobadorMotivo.title,
+          aprobadorEmail: aprobadorMotivo.email,
+          existingItems: existentesMismoAprobador,
+          accionSugerida: 'SIN_CAMBIOS',
+          crearRegistro: false,
+          evitaDuplicado: true,
+          observacion: 'El aprobador del motivo ya está registrado con ImpactadoPorMotivo marcado.'
+        }));
+        continue;
+      }
+
+      if (existentesMismoAprobador.length) {
+        totalMarcarMotivo++;
+        reportRows.push(buildRevisoresBajaMotivoRow({
+          solicitud,
+          aprobadorId: aprobadorMotivo.id,
+          aprobadorNombre: aprobadorMotivo.title,
+          aprobadorEmail: aprobadorMotivo.email,
+          existingItems: existentesMismoAprobador,
+          accionSugerida: 'MARCAR_MOTIVO',
+          crearRegistro: false,
+          evitaDuplicado: true,
+          observacion: existePorArea
+            ? 'El aprobador ya existe por área; corresponde marcar ImpactadoPorMotivo en el mismo registro, sin crear duplicado.'
+            : 'El aprobador ya existe para la solicitud; corresponde marcar ImpactadoPorMotivo en el registro existente, sin crear duplicado.'
+        }));
+        continue;
+      }
+
+      totalCrearRegistro++;
+      reportRows.push(buildRevisoresBajaMotivoRow({
+        solicitud,
+        aprobadorId: aprobadorMotivo.id,
+        aprobadorNombre: aprobadorMotivo.title,
+        aprobadorEmail: aprobadorMotivo.email,
+        existingItems: [],
+        accionSugerida: 'CREAR_REGISTRO',
+        crearRegistro: true,
+        evitaDuplicado: false,
+        observacion: 'No existe registro para este aprobador en la solicitud; se sugiere crear Revisor Impactado con ImpactadoPorMotivo marcado.'
+      }));
+    }
+  }
+
+  const workbook = buildRevisoresBajaMotivoWorkbook(reportRows);
+  writeInfo(
+    log,
+    `📌 Revisores Baja por Motivo | Dry run final | Solicitudes=${solicitudes.length} | ` +
+    `EsperadosPorMotivo=${totalAprobadoresMotivoEsperados} | Crear=${totalCrearRegistro} | ` +
+    `MarcarMotivo=${totalMarcarMotivo} | SinCambios=${totalSinCambios} | DuplicadosExistentes=${totalDuplicadosExistentes} | Error=${totalError}`
+  );
+  writeInfo(log, `📥 Revisores Baja por Motivo | Excel generado: ${workbook.fileName}`);
+
+  return {
+    blob: workbook.blob,
+    fileName: workbook.fileName,
+    totalSolicitudes: solicitudes.length,
+    totalAprobadoresMotivoEsperados,
+    totalCrearRegistro,
+    totalMarcarMotivo,
+    totalSinCambios,
+    totalDuplicadosExistentes,
+    totalError
+  };
 }
 
 function debeProcesarSolicitud(solicitud: ISolicitudItem): boolean {

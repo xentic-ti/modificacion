@@ -41,7 +41,7 @@ import { buscarSolicitudesDuplicadas } from '../services/solicitudesDuplicadas.s
 import { ejecutarCambioInstanciaDesdeExcel } from '../services/modificacionCambioInstancia.service';
 import { ejecutarCorreccionCodigosDuplicadosDesdeExcel } from '../services/modificacionCodigoDuplicado.service';
 import { ejecutarBuscarDiagramaFlujoSinCodigo } from '../services/buscarDiagramaFlujoSinCodigo.service';
-import { modificarAprobadores, rollbackModificarAprobadores } from '../services/modificarAprobadores.service';
+import { generarReporteRevisoresImpactadosBajaMotivo, modificarAprobadores, rollbackModificarAprobadores } from '../services/modificarAprobadores.service';
 
 const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, isDarkTheme }) => {
   const [excelFile, setExcelFile] = React.useState<IFilePickerResult | null>(null);
@@ -280,6 +280,38 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       setIsRunning(false);
     }
   }, [appendLog, context, descargarArchivo, excelFile]);
+
+  const ejecutarReporteRevisoresBajaMotivo = React.useCallback(async (): Promise<void> => {
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando dry run de revisores impactados por motivo para Baja de documentos...');
+
+    try {
+      const resultado = await generarReporteRevisoresImpactadosBajaMotivo({
+        context,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog(
+        `✅ Dry run Revisores Baja por Motivo terminado. ` +
+        `Solicitudes: ${resultado.totalSolicitudes} | ` +
+        `Aprobadores esperados por motivo: ${resultado.totalAprobadoresMotivoEsperados} | ` +
+        `Crear registros: ${resultado.totalCrearRegistro} | ` +
+        `Marcar motivo: ${resultado.totalMarcarMotivo} | ` +
+        `Sin cambios: ${resultado.totalSinCambios} | ` +
+        `Duplicados existentes: ${resultado.totalDuplicadosExistentes} | ` +
+        `Error: ${resultado.totalError}`
+      );
+      appendLog(`📥 Archivo generado: ${resultado.fileName}`);
+    } catch (reportError) {
+      const errorMessage = reportError instanceof Error ? reportError.message : String(reportError);
+      setError(errorMessage);
+      appendLog('❌ Error en dry run Revisores Baja por Motivo: ' + errorMessage);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, descargarArchivo]);
 
   const ejecutarReporteSolicitudesNoAntonio = React.useCallback(async (): Promise<void> => {
     setError(null);
@@ -1370,6 +1402,13 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                         text={isRunning ? 'Restaurando...' : 'Rollback ModificarAprobadores'}
                         onClick={() => { void ejecutarRollbackModificarAprobadores(); }}
                         disabled={!excelFile || isRunning}
+                      />
+                    </Stack>
+                    <Stack verticalAlign="end">
+                      <DefaultButton
+                        text={isRunning ? 'Generando dry run...' : 'Dry run Baja por motivo'}
+                        onClick={() => { void ejecutarReporteRevisoresBajaMotivo(); }}
+                        disabled={isRunning}
                       />
                     </Stack>
                   </Stack>
