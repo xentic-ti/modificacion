@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import { WebPartContext } from '@microsoft/sp-webpart-base';
 import { IFilePickerResult } from '@pnp/spfx-controls-react/lib/FilePicker';
 
-import { getAllItems, spGetJson, escapeODataValue, updateListItem } from './sharepointRest.service';
+import { addListItem, deleteListItem, getAllItems, spGetJson, escapeODataValue, updateListItem } from './sharepointRest.service';
 import { openExcelRevisionSession } from '../utils/modificacionExcelHelper';
 
 type LogFn = (message: string) => void;
@@ -15,6 +15,8 @@ const LIST_APROBADORES = 'Aprobadores por Solicitudes';
 const LIST_ACCIONES = 'Acciones';
 const LIST_AREAS_NEGOCIO = 'Áreas de Negocio';
 const ROL_REVISOR_IMPACTADO = 'Revisor Impactado';
+const ESTADO_APROBADOR_PENDIENTE = 'Pendiente';
+const ESTADO_SOLICITUD_REVISION_IMPACTO = 'Enviado a Revisión de Impacto';
 const ESTADOS_BAJA_MOTIVO_PERMITIDOS = new Set<string>([
   'observado',
   'en edicion',
@@ -101,6 +103,16 @@ export interface IRevisoresBajaMotivoResultado {
   totalSinCambios: number;
   totalDuplicadosExistentes: number;
   totalError: number;
+  totalAplicados: number;
+}
+
+export interface IRevisoresBajaMotivoRollbackResultado {
+  blob: Blob;
+  fileName: string;
+  totalFilas: number;
+  totalRestaurados: number;
+  totalOmitidos: number;
+  totalError: number;
 }
 
 interface IModificarAprobadoresReportRow {
@@ -150,6 +162,8 @@ interface IRevisoresBajaMotivoReportRow {
   ImpactadoPorMotivoSugerido: string;
   CrearRegistroSugerido: string;
   EvitaDuplicado: string;
+  AccionAplicada: string;
+  ResultadoAplicacion: string;
   Observacion: string;
 }
 
@@ -200,6 +214,8 @@ const revisoresBajaMotivoHeaders = [
   'ImpactadoPorMotivoSugerido',
   'CrearRegistroSugerido',
   'EvitaDuplicado',
+  'AccionAplicada',
+  'ResultadoAplicacion',
   'Observacion'
 ];
 
@@ -314,7 +330,7 @@ function autoFitRevisoresBajaMotivoColumns(rows: IRevisoresBajaMotivoReportRow[]
   return widths;
 }
 
-function buildRevisoresBajaMotivoWorkbook(rows: IRevisoresBajaMotivoReportRow[]): { blob: Blob; fileName: string; } {
+function buildRevisoresBajaMotivoWorkbook(rows: IRevisoresBajaMotivoReportRow[], prefix?: string): { blob: Blob; fileName: string; } {
   const safeRows = Array.isArray(rows) ? rows : [];
   const workbook = XLSX.utils.book_new();
   const worksheet = XLSX.utils.json_to_sheet(safeRows, { header: revisoresBajaMotivoHeaders });
@@ -330,7 +346,7 @@ function buildRevisoresBajaMotivoWorkbook(rows: IRevisoresBajaMotivoReportRow[])
   const now = new Date();
   const pad = (value: number): string => String(value).padStart(2, '0');
   const fileName =
-    `Revisores_Impactados_Baja_Motivo_DryRun_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
+    `${prefix || 'Revisores_Impactados_Baja_Motivo'}_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
     `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.xlsx`;
 
   return {
@@ -364,6 +380,43 @@ function buildHeaderMap(headers: any[]): Map<string, number> {
   }
 
   return result;
+}
+
+function buildRevisoresBajaMotivoHeaderMap(headers: any[]): Map<string, number> {
+  const result = new Map<string, number>();
+  for (let i = 0; i < revisoresBajaMotivoHeaders.length; i++) {
+    result.set(revisoresBajaMotivoHeaders[i], findHeaderIndex(headers, revisoresBajaMotivoHeaders[i]));
+  }
+
+  return result;
+}
+
+function parseRevisoresBajaMotivoRow(row: any[], headerMap: Map<string, number>): IRevisoresBajaMotivoReportRow {
+  return {
+    SolicitudId: Number(getCellValue(row, headerMap, 'SolicitudId') || 0) || '',
+    SolicitudTitulo: String(getCellValue(row, headerMap, 'SolicitudTitulo') || ''),
+    SolicitudEstado: String(getCellValue(row, headerMap, 'SolicitudEstado') || ''),
+    EstadoAnteriorVencimiento: String(getCellValue(row, headerMap, 'EstadoAnteriorVencimiento') || ''),
+    AccionSolicitud: String(getCellValue(row, headerMap, 'AccionSolicitud') || ''),
+    MotivoId: Number(getCellValue(row, headerMap, 'MotivoId') || 0) || '',
+    MotivoSolicitud: String(getCellValue(row, headerMap, 'MotivoSolicitud') || ''),
+    AprobadorId: Number(getCellValue(row, headerMap, 'AprobadorId') || 0) || '',
+    AprobadorNombre: String(getCellValue(row, headerMap, 'AprobadorNombre') || ''),
+    AprobadorEmail: String(getCellValue(row, headerMap, 'AprobadorEmail') || ''),
+    RegistroAprobadorId: Number(getCellValue(row, headerMap, 'RegistroAprobadorId') || 0) || '',
+    RegistrosMismoAprobador: String(getCellValue(row, headerMap, 'RegistrosMismoAprobador') || ''),
+    Rol: String(getCellValue(row, headerMap, 'Rol') || ''),
+    ImpactadoPorAreaActual: String(getCellValue(row, headerMap, 'ImpactadoPorAreaActual') || ''),
+    ImpactadoPorMotivoActual: String(getCellValue(row, headerMap, 'ImpactadoPorMotivoActual') || ''),
+    ImpactadoPorAccionActual: String(getCellValue(row, headerMap, 'ImpactadoPorAccionActual') || ''),
+    AccionSugerida: String(getCellValue(row, headerMap, 'AccionSugerida') || ''),
+    ImpactadoPorMotivoSugerido: String(getCellValue(row, headerMap, 'ImpactadoPorMotivoSugerido') || ''),
+    CrearRegistroSugerido: String(getCellValue(row, headerMap, 'CrearRegistroSugerido') || ''),
+    EvitaDuplicado: String(getCellValue(row, headerMap, 'EvitaDuplicado') || ''),
+    AccionAplicada: String(getCellValue(row, headerMap, 'AccionAplicada') || ''),
+    ResultadoAplicacion: String(getCellValue(row, headerMap, 'ResultadoAplicacion') || ''),
+    Observacion: String(getCellValue(row, headerMap, 'Observacion') || '')
+  };
 }
 
 function parseReportRow(row: any[], headerMap: Map<string, number>): IModificarAprobadoresReportRow {
@@ -599,8 +652,28 @@ function buildRevisoresBajaMotivoRow(params: {
     ImpactadoPorMotivoSugerido: formatBoolean(true),
     CrearRegistroSugerido: params.crearRegistro ? 'Si' : 'No',
     EvitaDuplicado: params.evitaDuplicado ? 'Si' : 'No',
+    AccionAplicada: '',
+    ResultadoAplicacion: '',
     Observacion: params.observacion
   };
+}
+
+async function crearAprobadorPorSolicitud(
+  context: WebPartContext,
+  webUrl: string,
+  solicitudId: number,
+  aprobadorId: number
+): Promise<number> {
+  return addListItem(context, webUrl, LIST_APROBADORES, {
+    SolicitudId: solicitudId,
+    AprobadorId: aprobadorId,
+    Rol: ROL_REVISOR_IMPACTADO,
+    Estado: ESTADO_APROBADOR_PENDIENTE,
+    EstadoSolicitud: ESTADO_SOLICITUD_REVISION_IMPACTO,
+    ImpactadoPorArea: false,
+    ImpactadoPorMotivo: true,
+    ImpactadoPorAccion: false
+  });
 }
 
 async function obtenerImpactadosPorMotivo(
@@ -834,6 +907,7 @@ export async function generarReporteRevisoresImpactadosBajaMotivo(params: {
   let totalSinCambios = 0;
   let totalDuplicadosExistentes = 0;
   let totalError = 0;
+  let totalAplicados = 0;
   const reportRows: IRevisoresBajaMotivoReportRow[] = [];
 
   for (let i = 0; i < solicitudes.length; i++) {
@@ -953,7 +1027,7 @@ export async function generarReporteRevisoresImpactadosBajaMotivo(params: {
 
       if (existentesMismoAprobador.length) {
         totalMarcarMotivo++;
-        reportRows.push(buildRevisoresBajaMotivoRow({
+        const reportRow = buildRevisoresBajaMotivoRow({
           solicitud,
           aprobadorId: aprobadorMotivo.id,
           aprobadorNombre: aprobadorMotivo.title,
@@ -963,14 +1037,34 @@ export async function generarReporteRevisoresImpactadosBajaMotivo(params: {
           crearRegistro: false,
           evitaDuplicado: true,
           observacion: existePorArea
-            ? 'El aprobador ya existe por área; corresponde marcar ImpactadoPorMotivo en el mismo registro, sin crear duplicado.'
+            ? 'El aprobador ya existe impactado por área; se reutiliza el mismo registro y se marca también ImpactadoPorMotivo, sin crear duplicado.'
             : 'El aprobador ya existe para la solicitud; corresponde marcar ImpactadoPorMotivo en el registro existente, sin crear duplicado.'
-        }));
+        });
+
+        try {
+          const registroId = Number(reportRow.RegistroAprobadorId || 0);
+          await updateListItem(params.context, webUrl, LIST_APROBADORES, registroId, {
+            ImpactadoPorMotivo: true
+          });
+          totalAplicados++;
+          reportRow.AccionAplicada = 'MARCAR_MOTIVO';
+          reportRow.ResultadoAplicacion = 'APLICADO';
+          reportRow.Observacion = 'ImpactadoPorMotivo marcado en el registro existente. El rollback restaurará el valor anterior usando este Excel.';
+          writeInfo(log, `✅ Revisores Baja por Motivo | Marcado motivo | Solicitud=${solicitudId} | Registro=${registroId} | Aprobador=${aprobadorMotivo.id}`);
+        } catch (error) {
+          totalError++;
+          reportRow.AccionAplicada = 'MARCAR_MOTIVO';
+          reportRow.ResultadoAplicacion = 'ERROR';
+          reportRow.Observacion = `No se pudo marcar ImpactadoPorMotivo: ${error instanceof Error ? error.message : String(error)}`;
+          writeError(log, `❌ Revisores Baja por Motivo | Error marcando motivo | Solicitud=${solicitudId} | Aprobador=${aprobadorMotivo.id} | ${reportRow.Observacion}`);
+        }
+
+        reportRows.push(reportRow);
         continue;
       }
 
       totalCrearRegistro++;
-      reportRows.push(buildRevisoresBajaMotivoRow({
+      const reportRow = buildRevisoresBajaMotivoRow({
         solicitud,
         aprobadorId: aprobadorMotivo.id,
         aprobadorNombre: aprobadorMotivo.title,
@@ -980,16 +1074,35 @@ export async function generarReporteRevisoresImpactadosBajaMotivo(params: {
         crearRegistro: true,
         evitaDuplicado: false,
         observacion: 'No existe registro para este aprobador en la solicitud; se sugiere crear Revisor Impactado con ImpactadoPorMotivo marcado.'
-      }));
+      });
+
+      try {
+        const newId = await crearAprobadorPorSolicitud(params.context, webUrl, solicitudId, aprobadorMotivo.id);
+        totalAplicados++;
+        reportRow.RegistroAprobadorId = newId || '';
+        reportRow.AccionAplicada = 'CREAR_REGISTRO';
+        reportRow.ResultadoAplicacion = 'APLICADO';
+        reportRow.Observacion = 'Registro creado como Revisor Impactado con ImpactadoPorMotivo marcado. El rollback eliminará este registro usando este Excel.';
+        writeInfo(log, `✅ Revisores Baja por Motivo | Registro creado | Solicitud=${solicitudId} | Registro=${newId} | Aprobador=${aprobadorMotivo.id}`);
+      } catch (error) {
+        totalError++;
+        reportRow.AccionAplicada = 'CREAR_REGISTRO';
+        reportRow.ResultadoAplicacion = 'ERROR';
+        reportRow.Observacion = `No se pudo crear el registro: ${error instanceof Error ? error.message : String(error)}`;
+        writeError(log, `❌ Revisores Baja por Motivo | Error creando registro | Solicitud=${solicitudId} | Aprobador=${aprobadorMotivo.id} | ${reportRow.Observacion}`);
+      }
+
+      reportRows.push(reportRow);
     }
   }
 
   const workbook = buildRevisoresBajaMotivoWorkbook(reportRows);
   writeInfo(
     log,
-    `📌 Revisores Baja por Motivo | Dry run final | Solicitudes=${solicitudes.length} | ` +
+    `📌 Revisores Baja por Motivo | Aplicación final | Solicitudes=${solicitudes.length} | ` +
     `EsperadosPorMotivo=${totalAprobadoresMotivoEsperados} | Crear=${totalCrearRegistro} | ` +
-    `MarcarMotivo=${totalMarcarMotivo} | SinCambios=${totalSinCambios} | DuplicadosExistentes=${totalDuplicadosExistentes} | Error=${totalError}`
+    `MarcarMotivo=${totalMarcarMotivo} | Aplicados=${totalAplicados} | ` +
+    `SinCambios=${totalSinCambios} | DuplicadosExistentes=${totalDuplicadosExistentes} | Error=${totalError}`
   );
   writeInfo(log, `📥 Revisores Baja por Motivo | Excel generado: ${workbook.fileName}`);
 
@@ -1002,6 +1115,106 @@ export async function generarReporteRevisoresImpactadosBajaMotivo(params: {
     totalMarcarMotivo,
     totalSinCambios,
     totalDuplicadosExistentes,
+    totalError,
+    totalAplicados
+  };
+}
+
+export async function rollbackRevisoresImpactadosBajaMotivo(params: {
+  context: WebPartContext;
+  excelFile: IFilePickerResult;
+  log?: LogFn;
+}): Promise<IRevisoresBajaMotivoRollbackResultado> {
+  const log = params.log || (() => undefined);
+  const webUrl = params.context.pageContext.web.absoluteUrl;
+  const session = await openExcelRevisionSession(params.excelFile);
+  const grid = session.grid || [];
+
+  if (!grid.length) {
+    throw new Error('El Excel de rollback de Baja por motivo está vacío.');
+  }
+
+  const headerMap = buildRevisoresBajaMotivoHeaderMap(grid[0] || []);
+  const requiredHeaders = [
+    'RegistroAprobadorId',
+    'ImpactadoPorMotivoActual',
+    'AccionAplicada',
+    'ResultadoAplicacion'
+  ];
+
+  for (let i = 0; i < requiredHeaders.length; i++) {
+    if ((headerMap.get(requiredHeaders[i]) ?? -1) < 0) {
+      throw new Error(`El Excel de rollback debe contener la columna "${requiredHeaders[i]}".`);
+    }
+  }
+
+  let totalRestaurados = 0;
+  let totalOmitidos = 0;
+  let totalError = 0;
+  const reportRows: IRevisoresBajaMotivoReportRow[] = [];
+
+  writeInfo(log, `↩️ Rollback Baja por Motivo | Archivo cargado: ${session.fileName}`);
+
+  for (let rowIndex = 1; rowIndex < grid.length; rowIndex++) {
+    const parsed = parseRevisoresBajaMotivoRow(grid[rowIndex] || [], headerMap);
+    const registroAprobadorId = Number(parsed.RegistroAprobadorId || 0);
+    const accionAplicada = normalizeKey(parsed.AccionAplicada);
+    const resultadoAplicacion = normalizeKey(parsed.ResultadoAplicacion);
+
+    if (!registroAprobadorId || resultadoAplicacion !== 'aplicado') {
+      totalOmitidos++;
+      parsed.ResultadoAplicacion = 'ROLLBACK_OMITIDO';
+      parsed.Observacion = !registroAprobadorId
+        ? 'Fila sin RegistroAprobadorId para rollback.'
+        : 'Fila omitida porque no tiene ResultadoAplicacion=APLICADO.';
+      reportRows.push(parsed);
+      continue;
+    }
+
+    try {
+      if (accionAplicada === 'crear_registro') {
+        await deleteListItem(params.context, webUrl, LIST_APROBADORES, registroAprobadorId);
+        totalRestaurados++;
+        parsed.ResultadoAplicacion = 'ROLLBACK_RESTAURADO';
+        parsed.Observacion = 'Registro creado por Baja por motivo eliminado durante rollback.';
+        writeInfo(log, `✅ Rollback Baja por Motivo | Registro creado eliminado=${registroAprobadorId}`);
+      } else if (accionAplicada === 'marcar_motivo') {
+        await updateListItem(params.context, webUrl, LIST_APROBADORES, registroAprobadorId, {
+          ImpactadoPorMotivo: isTruthyField(parsed.ImpactadoPorMotivoActual)
+        });
+        totalRestaurados++;
+        parsed.ResultadoAplicacion = 'ROLLBACK_RESTAURADO';
+        parsed.Observacion = 'ImpactadoPorMotivo restaurado al valor anterior registrado en el Excel.';
+        writeInfo(log, `✅ Rollback Baja por Motivo | Motivo restaurado Registro=${registroAprobadorId}`);
+      } else {
+        totalOmitidos++;
+        parsed.ResultadoAplicacion = 'ROLLBACK_OMITIDO';
+        parsed.Observacion = `AccionAplicada no soportada para rollback: ${parsed.AccionAplicada || '(vacía)'}.`;
+      }
+    } catch (error) {
+      totalError++;
+      parsed.ResultadoAplicacion = 'ROLLBACK_ERROR';
+      parsed.Observacion = `No se pudo ejecutar rollback: ${error instanceof Error ? error.message : String(error)}`;
+      writeError(log, `❌ Rollback Baja por Motivo | Error Registro=${registroAprobadorId} | ${parsed.Observacion}`);
+    }
+
+    reportRows.push(parsed);
+  }
+
+  const workbook = buildRevisoresBajaMotivoWorkbook(reportRows, 'Rollback_Revisores_Impactados_Baja_Motivo');
+  writeInfo(
+    log,
+    `📌 Rollback Baja por Motivo | Resumen final | Filas=${Math.max(grid.length - 1, 0)} | ` +
+    `Restaurados=${totalRestaurados} | Omitidos=${totalOmitidos} | Error=${totalError}`
+  );
+  writeInfo(log, `📥 Rollback Baja por Motivo | Excel de resultado generado: ${workbook.fileName}`);
+
+  return {
+    blob: workbook.blob,
+    fileName: workbook.fileName,
+    totalFilas: Math.max(grid.length - 1, 0),
+    totalRestaurados,
+    totalOmitidos,
     totalError
   };
 }

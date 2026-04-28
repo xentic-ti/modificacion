@@ -41,10 +41,12 @@ import { buscarSolicitudesDuplicadas } from '../services/solicitudesDuplicadas.s
 import { ejecutarCambioInstanciaDesdeExcel } from '../services/modificacionCambioInstancia.service';
 import { ejecutarCorreccionCodigosDuplicadosDesdeExcel } from '../services/modificacionCodigoDuplicado.service';
 import { ejecutarBuscarDiagramaFlujoSinCodigo } from '../services/buscarDiagramaFlujoSinCodigo.service';
-import { generarReporteRevisoresImpactadosBajaMotivo, modificarAprobadores, rollbackModificarAprobadores } from '../services/modificarAprobadores.service';
+import { generarReporteRevisoresImpactadosBajaMotivo, modificarAprobadores, rollbackModificarAprobadores, rollbackRevisoresImpactadosBajaMotivo } from '../services/modificarAprobadores.service';
 
 const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, isDarkTheme }) => {
   const [excelFile, setExcelFile] = React.useState<IFilePickerResult | null>(null);
+  const [bajaMotivoRollbackFile, setBajaMotivoRollbackFile] = React.useState<IFilePickerResult | null>(null);
+  const bajaMotivoRollbackObjectUrlRef = React.useRef<string>('');
   const [copiarHijosPadreOrigenId, setCopiarHijosPadreOrigenId] = React.useState<string>('');
   const [copiarHijosPadreDestinoId, setCopiarHijosPadreDestinoId] = React.useState<string>('');
   const [sourceFolderUrl, setSourceFolderUrl] = React.useState<string>('');
@@ -68,6 +70,23 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
 
   const appendLog = React.useCallback((linea: string) => {
     setLogRevision((prev) => `${prev}\n${linea}`);
+  }, []);
+
+  const clearBajaMotivoRollbackFile = React.useCallback((): void => {
+    if (bajaMotivoRollbackObjectUrlRef.current) {
+      URL.revokeObjectURL(bajaMotivoRollbackObjectUrlRef.current);
+      bajaMotivoRollbackObjectUrlRef.current = '';
+    }
+
+    setBajaMotivoRollbackFile(null);
+  }, []);
+
+  React.useEffect(() => {
+    return () => {
+      if (bajaMotivoRollbackObjectUrlRef.current) {
+        URL.revokeObjectURL(bajaMotivoRollbackObjectUrlRef.current);
+      }
+    };
   }, []);
 
   const onSaveExcel = React.useCallback((files: IFilePickerResult[]): void => {
@@ -94,13 +113,14 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
     setFase8RollbackEntries([]);
     setFase9RollbackEntries([]);
     setLastExecutedPhase(null);
+    clearBajaMotivoRollbackFile();
     setError(null);
     setLogRevision([
       'Panel de revisión listo.',
       `Archivo cargado desde SharePoint: ${selectedFile.fileName}`,
       'La revisión ya puede ejecutarse con ese archivo.'
     ].join('\n'));
-  }, []);
+  }, [clearBajaMotivoRollbackFile]);
 
   const descargarArchivo = React.useCallback((blob: Blob, fileName: string): void => {
     const blobUrl = URL.createObjectURL(blob);
@@ -225,6 +245,13 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       });
 
       descargarArchivo(resultado.blob, resultado.fileName);
+      clearBajaMotivoRollbackFile();
+      const rollbackObjectUrl = URL.createObjectURL(resultado.blob);
+      bajaMotivoRollbackObjectUrlRef.current = rollbackObjectUrl;
+      setBajaMotivoRollbackFile({
+        fileName: resultado.fileName,
+        fileAbsoluteUrl: rollbackObjectUrl
+      } as IFilePickerResult);
       appendLog(
         `✅ ModificarAprobadores terminado. ` +
         `Encontrados: ${resultado.totalEncontrados} | ` +
@@ -284,7 +311,7 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
   const ejecutarReporteRevisoresBajaMotivo = React.useCallback(async (): Promise<void> => {
     setError(null);
     setIsRunning(true);
-    setLogRevision('Iniciando dry run de revisores impactados por motivo para Baja de documentos...');
+    setLogRevision('Iniciando aplicación de revisores impactados por motivo para Baja de documentos...');
 
     try {
       const resultado = await generarReporteRevisoresImpactadosBajaMotivo({
@@ -294,24 +321,64 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
 
       descargarArchivo(resultado.blob, resultado.fileName);
       appendLog(
-        `✅ Dry run Revisores Baja por Motivo terminado. ` +
+        `✅ Baja por Motivo aplicada. ` +
         `Solicitudes: ${resultado.totalSolicitudes} | ` +
         `Aprobadores esperados por motivo: ${resultado.totalAprobadoresMotivoEsperados} | ` +
         `Crear registros: ${resultado.totalCrearRegistro} | ` +
         `Marcar motivo: ${resultado.totalMarcarMotivo} | ` +
+        `Aplicados: ${resultado.totalAplicados} | ` +
         `Sin cambios: ${resultado.totalSinCambios} | ` +
         `Duplicados existentes: ${resultado.totalDuplicadosExistentes} | ` +
         `Error: ${resultado.totalError}`
       );
+      appendLog('ℹ️ Usa este mismo Excel generado para ejecutar el rollback de Baja por motivo.');
       appendLog(`📥 Archivo generado: ${resultado.fileName}`);
     } catch (reportError) {
       const errorMessage = reportError instanceof Error ? reportError.message : String(reportError);
       setError(errorMessage);
-      appendLog('❌ Error en dry run Revisores Baja por Motivo: ' + errorMessage);
+      appendLog('❌ Error aplicando Revisores Baja por Motivo: ' + errorMessage);
     } finally {
       setIsRunning(false);
     }
   }, [appendLog, context, descargarArchivo]);
+
+  const ejecutarRollbackRevisoresBajaMotivo = React.useCallback(async (): Promise<void> => {
+    const rollbackExcelFile = bajaMotivoRollbackFile || excelFile;
+
+    if (!rollbackExcelFile) {
+      setError('Debes seleccionar el Excel generado por Baja por motivo antes de ejecutar el rollback.');
+      appendLog('No se pudo iniciar el rollback de Baja por motivo porque no hay Excel seleccionado.');
+      return;
+    }
+
+    setError(null);
+    setIsRunning(true);
+    setLogRevision(`Iniciando rollback de Baja por motivo desde el archivo: ${rollbackExcelFile.fileName}`);
+
+    try {
+      const resultado = await rollbackRevisoresImpactadosBajaMotivo({
+        context,
+        excelFile: rollbackExcelFile,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog(
+        `✅ Rollback Baja por Motivo terminado. ` +
+        `Filas: ${resultado.totalFilas} | ` +
+        `Restaurados: ${resultado.totalRestaurados} | ` +
+        `Omitidos: ${resultado.totalOmitidos} | ` +
+        `Error: ${resultado.totalError}`
+      );
+      appendLog(`📥 Archivo generado: ${resultado.fileName}`);
+    } catch (rollbackError) {
+      const errorMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+      setError(errorMessage);
+      appendLog('❌ Error en rollback Baja por Motivo: ' + errorMessage);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, bajaMotivoRollbackFile, context, descargarArchivo, excelFile]);
 
   const ejecutarReporteSolicitudesNoAntonio = React.useCallback(async (): Promise<void> => {
     setError(null);
@@ -1406,9 +1473,16 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                     </Stack>
                     <Stack verticalAlign="end">
                       <DefaultButton
-                        text={isRunning ? 'Generando dry run...' : 'Dry run Baja por motivo'}
+                        text={isRunning ? 'Aplicando baja...' : 'Aplicar Baja por motivo'}
                         onClick={() => { void ejecutarReporteRevisoresBajaMotivo(); }}
                         disabled={isRunning}
+                      />
+                    </Stack>
+                    <Stack verticalAlign="end">
+                      <DefaultButton
+                        text={isRunning ? 'Restaurando baja...' : 'Rollback Baja por motivo'}
+                        onClick={() => { void ejecutarRollbackRevisoresBajaMotivo(); }}
+                        disabled={(!excelFile && !bajaMotivoRollbackFile) || isRunning}
                       />
                     </Stack>
                   </Stack>
