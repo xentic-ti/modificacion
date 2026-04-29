@@ -38,6 +38,8 @@ import { corregirDocPadresDesdeRelaciones } from '../services/docPadresFix.servi
 import { copiarHijosRelacionesDocumentos } from '../services/copiarHijos.service';
 import { exportarSolicitudesNoCreadasPorAntonio } from '../services/solicitudesNoAntonio.service';
 import { buscarSolicitudesDuplicadas } from '../services/solicitudesDuplicadas.service';
+import { exportarProcesosSinSolicitud } from '../services/procesosSinSolicitud.service';
+import { exportarAltaDocumentosAprobadoresIncompletos } from '../services/altaDocumentosAprobadoresIncompletos.service';
 import { ejecutarCambioInstanciaDesdeExcel } from '../services/modificacionCambioInstancia.service';
 import { ejecutarCorreccionCodigosDuplicadosDesdeExcel } from '../services/modificacionCodigoDuplicado.service';
 import { ejecutarBuscarDiagramaFlujoSinCodigo } from '../services/buscarDiagramaFlujoSinCodigo.service';
@@ -427,6 +429,56 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
       const errorMessage = reportError instanceof Error ? reportError.message : String(reportError);
       setError(errorMessage);
       appendLog(`❌ Error generando reporte de duplicados: ${errorMessage}`);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, descargarArchivo]);
+
+  const ejecutarReporteProcesosSinSolicitud = React.useCallback(async (): Promise<void> => {
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando reporte de documentos en Procesos sin Solicitud...');
+
+    try {
+      const resultado = await exportarProcesosSinSolicitud({
+        context,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog(`✅ Reporte generado. Documentos leidos en Procesos: ${resultado.totalDocumentos}`);
+      appendLog(`⚠️ Documentos sin Solicitud: ${resultado.totalSinSolicitud}`);
+      appendLog(`📥 Archivo generado: ${resultado.fileName}`);
+    } catch (reportError) {
+      const errorMessage = reportError instanceof Error ? reportError.message : String(reportError);
+      setError(errorMessage);
+      appendLog(`❌ Error generando reporte de Procesos sin Solicitud: ${errorMessage}`);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [appendLog, context, descargarArchivo]);
+
+  const ejecutarReporteAltaDocumentosAprobadoresIncompletos = React.useCallback(async (): Promise<void> => {
+    setError(null);
+    setIsRunning(true);
+    setLogRevision('Iniciando reporte de Alta de documentos con aprobadores incompletos...');
+
+    try {
+      const resultado = await exportarAltaDocumentosAprobadoresIncompletos({
+        context,
+        log: appendLog
+      });
+
+      descargarArchivo(resultado.blob, resultado.fileName);
+      appendLog(`✅ Reporte generado. Solicitudes leidas: ${resultado.totalSolicitudes}`);
+      appendLog(`📌 Solicitudes objetivo: ${resultado.totalSolicitudesObjetivo}`);
+      appendLog(`⚠️ Solicitudes con incompletos: ${resultado.totalSolicitudesConIncompletos}`);
+      appendLog(`⚠️ Filas incluidas en Excel: ${resultado.totalFilas}`);
+      appendLog(`📥 Archivo generado: ${resultado.fileName}`);
+    } catch (reportError) {
+      const errorMessage = reportError instanceof Error ? reportError.message : String(reportError);
+      setError(errorMessage);
+      appendLog(`❌ Error generando reporte de Alta de documentos con aprobadores incompletos: ${errorMessage}`);
     } finally {
       setIsRunning(false);
     }
@@ -1387,6 +1439,18 @@ const Modificacion: React.FC<IModificacionProps> = ({ context, hasTeamsContext, 
                     <DefaultButton
                       text={isRunning ? 'Generando duplicados...' : 'Reporte: duplicadas por codigo'}
                       onClick={() => { void ejecutarReporteSolicitudesDuplicadas(); }}
+                      disabled={isRunning}
+                    />
+
+                    <DefaultButton
+                      text={isRunning ? 'Revisando Procesos...' : 'Reporte: Procesos sin Solicitud'}
+                      onClick={() => { void ejecutarReporteProcesosSinSolicitud(); }}
+                      disabled={isRunning}
+                    />
+
+                    <DefaultButton
+                      text={isRunning ? 'Revisando aprobadores...' : 'Reporte: alta con aprobadores incompletos'}
+                      onClick={() => { void ejecutarReporteAltaDocumentosAprobadoresIncompletos(); }}
                       disabled={isRunning}
                     />
 
