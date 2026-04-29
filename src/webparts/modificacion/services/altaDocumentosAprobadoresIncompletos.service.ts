@@ -109,6 +109,7 @@ export async function exportarAltaDocumentosAprobadoresIncompletos(params: {
         solicitud,
         null,
         null,
+        registros,
         'No se encontraron aprobadores esperados configurados por motivo, área ni acción para esta solicitud.'
       ));
       continue;
@@ -132,6 +133,7 @@ export async function exportarAltaDocumentosAprobadoresIncompletos(params: {
         solicitud,
         bestRegistro,
         expectedApprover,
+        registros,
         buildMotivoFaltante(expectedApprover, bestRegistro, registros.length)
       ));
     }
@@ -439,8 +441,11 @@ function buildReportRow(
   solicitud: ISolicitudItem,
   aprobador: IAprobadorSolicitudItem | null,
   expected: IExpectedApprover | null,
+  registrosSolicitud: IAprobadorSolicitudItem[],
   motivo: string
 ): IAltaDocumentoAprobadorIncompletoRow {
+  const registros = Array.isArray(registrosSolicitud) ? registrosSolicitud : [];
+
   return {
     SolicitudId: Number(solicitud.Id || 0),
     SolicitudTitulo: String(solicitud.Title || '').trim(),
@@ -452,6 +457,9 @@ function buildReportRow(
     AreasImpactadas: formatAreasImpactadas(solicitud),
     AccionSolicitud: String(solicitud.Accion || '').trim(),
     EstadoSolicitud: String(solicitud.Estado?.Title || '').trim(),
+    TotalAprobadoresActuales: registros.length,
+    AprobadoresActuales: formatAprobadoresActuales(registros),
+    RevisoresImpactadosActuales: formatRevisoresImpactadosActuales(registros),
     TipoAprobadorEsperado: String(expected?.tipo || '').trim(),
     OrigenAprobadorEsperado: String(expected?.origen || '').trim(),
     AprobadorEsperadoId: Number(expected?.id || 0) || '',
@@ -471,6 +479,38 @@ function buildReportRow(
     CreatedAprobador: String(aprobador?.Created || '').trim(),
     ModifiedAprobador: String(aprobador?.Modified || '').trim()
   };
+}
+
+function formatAprobadoresActuales(registros: IAprobadorSolicitudItem[]): string {
+  if (!registros.length) {
+    return '';
+  }
+
+  return registros.map(formatAprobadorActual).join(' || ');
+}
+
+function formatRevisoresImpactadosActuales(registros: IAprobadorSolicitudItem[]): string {
+  const revisores = registros.filter((registro) => normalizeKey(registro.Rol || '') === normalizeKey(ROL_REVISOR_IMPACTADO));
+  if (!revisores.length) {
+    return '';
+  }
+
+  return revisores.map(formatAprobadorActual).join(' || ');
+}
+
+function formatAprobadorActual(registro: IAprobadorSolicitudItem): string {
+  const id = Number(registro.Id || 0) || '';
+  const aprobadorId = getAprobadorId(registro) || '';
+  const nombre = String(registro.Aprobador?.Title || '').trim();
+  const email = String(registro.Aprobador?.EMail || '').trim();
+  const rol = String(registro.Rol || '').trim();
+  const flags = [
+    `Area=${formatBooleanField(registro.ImpactadoPorArea) || 'No'}`,
+    `Motivo=${formatBooleanField(registro.ImpactadoPorMotivo) || 'No'}`,
+    `Accion=${formatBooleanField(registro.ImpactadoPorAccion) || 'No'}`
+  ].join(',');
+
+  return `Registro=${id}; AprobadorId=${aprobadorId}; Nombre=${nombre}; Email=${email}; Rol=${rol}; ${flags}`;
 }
 
 function formatAreasImpactadas(solicitud: ISolicitudItem): string {

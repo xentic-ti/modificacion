@@ -13,6 +13,9 @@ export interface IAltaDocumentoAprobadorIncompletoRow {
   AreasImpactadas: string;
   AccionSolicitud: string;
   EstadoSolicitud: string;
+  TotalAprobadoresActuales: number;
+  AprobadoresActuales: string;
+  RevisoresImpactadosActuales: string;
   TipoAprobadorEsperado: string;
   OrigenAprobadorEsperado: string;
   AprobadorEsperadoId: number | '';
@@ -44,6 +47,9 @@ const headers = [
   'AreasImpactadas',
   'AccionSolicitud',
   'EstadoSolicitud',
+  'TotalAprobadoresActuales',
+  'AprobadoresActuales',
+  'RevisoresImpactadosActuales',
   'TipoAprobadorEsperado',
   'OrigenAprobadorEsperado',
   'AprobadorEsperadoId',
